@@ -1,35 +1,35 @@
-# Control Enercon Wind Turbines via HTTP API
+# Control Enercon Wind Turbines
 
-This package uses the gopcxmlda package to interact via OPC XML DA with an Enercon SCADA PC and exposes an HTTP API to control Enercon Wind Turbines.
+This package uses the gopcxmlda package to interact via OPC XML DA with an Enercon SCADA PC and exposes functions to control Enercon Wind Turbines.
 
-It uses Go as programming language, that's why ener**G**ontrol.
-
-One can say this is a translator or gateway for an easier access, as the OPC XML DA protocol, used by Enercon to control Wind Turbines, is very outdated and has it's own issues.
-
-## Endpoints
-The following HTTP endpoints are implemented:
-### /start
-POST: Start one or more turbines.
+## Functions
+The following Functions are implemented:
+### Start(Server, PlantNo..)
+Start one or more turbines.
 
 Example: (ToDo)
 
-### /stop
-POST: Stop one or more turbines.
+### Stop(Server, Stoptype, PlantNo..)
+Stop one or more turbines. Stoptype can be uint8(60) for 60° stop or uint8(90) for 90° Stop.
 
 Example: (ToDo)
 
-### /reset
-POST: Reset one or more turbines.
+### Reset(Server, PlantNo..)
+Reset one or more turbines.
 
 Example: (ToDo)
 
-### /turbines
-GET: Get a list of turbines and which controls are available for each turbine.
+### turbines(Server)
+Get a list of turbines and which controls are available for each turbine.
 
 Example:
 
-## Configuration
-The hostname/IP of the Enercon SCADA PC is required at start and can be passed via command line parameter.
+## Data Structure "Server"
+Containsi information about the OPC-XML-DA host.
 
-Example:
-./energontrol \<hostname\>
+type Server struct {
+	Addr     string        // Address of the server
+	Port     string        // Port number of the server
+	LocaleID string        // Locale ID of the server
+	timeout  time.Duration // Timeout duration for the connection
+}
