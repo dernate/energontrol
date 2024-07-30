@@ -4,28 +4,50 @@ This package uses the gopcxmlda package to interact via OPC XML DA with an Enerc
 
 ## Functions
 The following Functions are implemented:
+
+The following Functions are not yet implemented:
+- [ ] Start
+- [ ] Stop
+- [ ] Reset
+- [ ] Turbines
+
 ### Start(Server, PlantNo..)
 Start one or more turbines.
 
-Example: (ToDo)
+Example: ...
 
 ### Stop(Server, Stoptype, PlantNo..)
 Stop one or more turbines. Stoptype can be uint8(60) for 60° stop or uint8(90) for 90° Stop.
 
-Example: (ToDo)
+Example: ...
 
 ### Reset(Server, PlantNo..)
 Reset one or more turbines.
 
-Example: (ToDo)
+Example: ...
 
-### turbines(Server)
+### RbhOn(Server, PlantNo..)
+Set the Rotor Blade Heating to "Manual On".
+
+Example: ...
+
+### RbhAutoOff(Server, PlantNo..)
+Set the Rotor Blade Heating to "Auto Off" (Supress Automatic -> Off).
+
+Example: ...
+
+### RbhStandard(Server, PlantNo..)
+Set the Rotor Blade Heating to "Standard".
+
+Example: ...
+
+### Turbines(Server)
 Get a list of turbines and which controls are available for each turbine.
 
-Example:
+Example: ...
 
 ## Data Structure "Server"
-Containsi information about the OPC-XML-DA host.
+Contains information about the OPC-XML-DA host.
 
 type Server struct {
 	Addr     string        // Address of the server
