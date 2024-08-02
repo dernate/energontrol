@@ -369,12 +369,12 @@ func submitValue(Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, Publ
 	}
 }
 
-func writeResetValue(Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint64, PrivateKey uint16, PublicKey uint64) error {
+func writeResetValue(Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, PublicKey uint64) error {
 	items := []gopcxmlda.T_Item{
 		{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Reset/SetReset", PlantNo),
 			Value: gopcxmlda.T_Value{
-				Value: []uint64{CtrlValue, uint64(PrivateKey), PublicKey},
+				Value: []uint64{uint64(PlantNo), uint64(PrivateKey), PublicKey},
 			},
 		},
 	}
@@ -391,4 +391,119 @@ func writeResetValue(Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint64, P
 	} else {
 		return nil
 	}
+}
+
+func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+	var success []bool
+	var errList []error
+	SessionType := "Reset"
+	Action := "Reset"
+	if len(PlantNo) == 0 {
+		return nil, nil
+	}
+	// Get session state
+	SesState, err := sessionState(Server, SessionType, WaitForSessionState{}, PlantNo...)
+	if err != nil {
+		for range PlantNo {
+			errList = append(errList, err)
+		}
+		return nil, errList
+	}
+	for i, _sessionState := range SesState {
+		if _sessionState != 0 {
+			errMsg := fmt.Sprintf("Can't start session, %s", getSessionStateText(_sessionState))
+			LogWarn(PlantNo[i], Action, errMsg)
+			errList = append(errList, fmt.Errorf(errMsg))
+			success = append(success, false)
+			continue
+		}
+		// do session request
+		SessionRequestValues := generateSessionRequest(UserId)
+		err := requestSession(Server, SessionRequestValues, PlantNo[i], SessionType)
+		if err != nil {
+			errList = append(errList, err)
+			success = append(success, false)
+			continue
+		}
+		// Get new Session State
+		WaitFor := WaitForSessionState{
+			Desired: 1,
+			Sleep:   100 * time.Millisecond,
+			Retries: 10,
+		}
+
+		SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo[i])
+		if err != nil {
+			errList = append(errList, err)
+			success = append(success, false)
+			continue
+		}
+		if SesState[0] != 1 {
+			errMsg := fmt.Sprintf("Session error for Plant %d, %s", PlantNo[i], getSessionStateText(SesState[0]))
+			LogWarn(PlantNo[i], Action, errMsg)
+			errList = append(errList, fmt.Errorf(errMsg))
+			success = append(success, false)
+			continue
+		}
+		PublicKey, err := getPublicKey(Server, PlantNo[i], SessionType)
+		if err != nil {
+			errList = append(errList, err)
+			success = append(success, false)
+			continue
+		}
+		err = writeResetValue(Server, PlantNo[i], SessionRequestValues.PrivateKey, PublicKey)
+		if err != nil {
+			errList = append(errList, err)
+			success = append(success, false)
+			continue
+		}
+		// Get new Session State
+		WaitFor = WaitForSessionState{
+			Desired: 2,
+			Sleep:   100 * time.Millisecond,
+			Retries: 10,
+		}
+		SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo[i])
+		if err != nil {
+			errList = append(errList, err)
+			success = append(success, false)
+			continue
+		}
+		if SesState[0] != 2 {
+			errMsg := fmt.Sprintf("Session error for Plant %d, %s", PlantNo[i], getSessionStateText(SesState[0]))
+			LogWarn(PlantNo[i], Action, errMsg)
+			errList = append(errList, fmt.Errorf(errMsg))
+			success = append(success, false)
+			continue
+		}
+		err = submitValue(Server, PlantNo[i], SessionRequestValues.PrivateKey, PublicKey, SessionType)
+		if err != nil {
+			errList = append(errList, err)
+			success = append(success, false)
+			continue
+		}
+		// Get new Session State
+		WaitFor = WaitForSessionState{
+			Desired: 4,
+			Sleep:   100 * time.Millisecond,
+			Retries: 10,
+		}
+		SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo[i])
+		if err != nil {
+			errList = append(errList, err)
+			success = append(success, false)
+			continue
+		}
+		if SesState[0] != 4 {
+			errMsg := fmt.Sprintf("Session error for Plant %d, %s", PlantNo[i], getSessionStateText(SesState[0]))
+			LogWarn(PlantNo[i], Action, errMsg)
+			errList = append(errList, fmt.Errorf(errMsg))
+			success = append(success, false)
+			continue
+		} else {
+			errList = append(errList, nil)
+			success = append(success, true)
+		}
+	}
+	return success, errList
 }

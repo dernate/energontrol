@@ -135,3 +135,34 @@ func Stop(Server gopcxmlda.Server, UserId uint64, FullStop bool, ForceExplicitCo
 	}
 	return stopped, errList
 }
+
+func Reset(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+	var errList []error
+	var resetted []bool
+	if len(PlantNo) == 0 {
+		return nil, nil
+	} else {
+		for range PlantNo {
+			resetted = append(resetted, false)
+			errList = append(errList, nil)
+		}
+	}
+	Action := "Reset"
+	// check if Server is connected
+	if available, err := serverAvailable(Server); !available {
+		for range PlantNo {
+			errList = append(errList, err)
+		}
+		return make([]bool, len(PlantNo)), errList
+	}
+	// Reset Plants
+	resetted, errList = resetProcedure(Server, UserId, PlantNo...)
+	if len(errList) > 0 {
+		for i, err := range errList {
+			if err != nil {
+				LogError(PlantNo[i], Action, err.Error())
+			}
+		}
+	}
+	return resetted, errList
+}

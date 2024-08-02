@@ -56,10 +56,15 @@ PlantNo := []uint8{2, 4}
 stopped, errList := Stop(Server, UserId, true, true, PlantNo...)
 ```
 
-### Reset(Server, PlantNo..)
+### Reset(Server, UserId, PlantNo..)
 Reset one or more turbines.
 
-Example: ...
+Example:
+```go
+UserId := 1234
+PlantNo := []uint8{2, 4}
+resetted, errList := Reset(Server, UserId, PlantNo...)
+```
 
 ### RbhOn(Server, PlantNo...)
 Set the Rotor Blade Heating to "Manual On".

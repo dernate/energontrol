@@ -270,3 +270,50 @@ func TestGetSessionStateText(t *testing.T) {
 	}
 	t.Log("Test passed")
 }
+
+func TestReset(t *testing.T) {
+	err := godotenv.Load()
+	if err != nil {
+		t.Fatal("Error loading .env file")
+	}
+	OPCIP := os.Getenv("IP")
+	OPCPort := os.Getenv("PORT")
+
+	Server := gopcxmlda.Server{
+		Addr:     OPCIP,
+		Port:     OPCPort,
+		LocaleID: "en-us",
+		Timeout:  10,
+	}
+	PlantNo := []uint8{2}
+	userIdStr := os.Getenv("USERID")
+	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
+	resetted, errList := Reset(Server, UserId, PlantNo...)
+	if len(errList) > 0 {
+		for _, err := range errList {
+			if err != nil {
+				t.Errorf("Error: %s", err)
+			}
+		}
+	}
+	if len(resetted) == 0 {
+		t.Errorf("Return Value of \"resetted\" empty")
+	} else {
+		// check if returned values indicate resetted plants
+		var bErr bool
+		for i, r := range resetted {
+			if !r {
+				t.Errorf("Error: Plant %d did not reset", PlantNo[i])
+				bErr = true
+			}
+		}
+		if !bErr {
+			t.Log("Test passed")
+		} else {
+			t.Error("Test failed")
+		}
+	}
+}
