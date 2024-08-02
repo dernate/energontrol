@@ -6,9 +6,9 @@ This package uses the gopcxmlda package to interact via OPC XML DA with an Enerc
 The following Functions are implemented:
 - [ ] Start
 - [ ] Stop
+- [ ] Reset
 
 The following Functions are not yet implemented:
-- [ ] Reset
 - [ ] RbhOn
 - [ ] RbhAutoOff
 - [ ] RbhStandard
