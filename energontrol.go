@@ -228,3 +228,127 @@ func RbhOn(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 	}
 	return rbhOn, errList
 }
+
+func RbhAutoOff(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+	var errList []error
+	var rbhAutoOff []bool
+	if len(PlantNo) == 0 {
+		return nil, nil
+	} else {
+		for range PlantNo {
+			rbhAutoOff = append(rbhAutoOff, false)
+			errList = append(errList, nil)
+		}
+	}
+	// check if Server is connected
+	if available, err := serverAvailable(server); !available {
+		for range PlantNo {
+			errList = append(errList, err)
+		}
+		return make([]bool, len(PlantNo)), errList
+	}
+	// check if plants have already the desired state
+	plantState, err := getPlantCtrlOrRbhState(server, "Rbh", PlantNo)
+	if err != nil {
+		for range PlantNo {
+			errList = append(errList, err)
+		}
+		return make([]bool, len(PlantNo)), errList
+	}
+	// check if Rbh is already AutoOff. If not set an Action Bit
+	setActionRbh(&plantState, 2)
+	// Filter plants based on the evaluated Action Bit
+	var PlantNoToRbhAutoOff []uint8
+	for i, state := range plantState {
+		if !state.Action {
+			LogInfo(state.PlantNo, "RbhAutoOff", "Plant Rbh already AutoOff")
+			rbhAutoOff[i] = true
+		} else {
+			// Process just plants, that are not already started
+			PlantNoToRbhAutoOff = append(PlantNoToRbhAutoOff, PlantNo[i])
+		}
+	}
+	// start Rbh for plants
+	rbhAutoOffFiltered, errListFiltered := controlProcedure(server, UserId, 2, "Rbh", PlantNoToRbhAutoOff...)
+	if len(errListFiltered) > 0 {
+		for i, err := range errListFiltered {
+			if err != nil {
+				LogError(PlantNoToRbhAutoOff[i], "RbhAutoOff", err.Error())
+				for j, p := range PlantNo {
+					if PlantNoToRbhAutoOff[i] == p {
+						errList[j] = err
+					}
+				}
+			} else if rbhAutoOffFiltered[i] {
+				for j, p := range PlantNo {
+					if PlantNoToRbhAutoOff[i] == p {
+						rbhAutoOff[j] = true
+					}
+				}
+			}
+		}
+	}
+	return rbhAutoOff, errList
+}
+
+func RbhStandard(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+	var errList []error
+	var rbhStandard []bool
+	if len(PlantNo) == 0 {
+		return nil, nil
+	} else {
+		for range PlantNo {
+			rbhStandard = append(rbhStandard, false)
+			errList = append(errList, nil)
+		}
+	}
+	// check if Server is connected
+	if available, err := serverAvailable(server); !available {
+		for range PlantNo {
+			errList = append(errList, err)
+		}
+		return make([]bool, len(PlantNo)), errList
+	}
+	// check if plants have already the desired state
+	plantState, err := getPlantCtrlOrRbhState(server, "Rbh", PlantNo)
+	if err != nil {
+		for range PlantNo {
+			errList = append(errList, err)
+		}
+		return make([]bool, len(PlantNo)), errList
+	}
+	// check if Rbh is already Standard. If not set an Action Bit
+	setActionRbh(&plantState, 0)
+	// Filter plants based on the evaluated Action Bit
+	var PlantNoToRbhStandard []uint8
+	for i, state := range plantState {
+		if !state.Action {
+			LogInfo(state.PlantNo, "RbhStandard", "Plant Rbh already Standard")
+			rbhStandard[i] = true
+		} else {
+			// Process just plants, that are not already started
+			PlantNoToRbhStandard = append(PlantNoToRbhStandard, PlantNo[i])
+		}
+	}
+	// start Rbh for plants
+	rbhStandardFiltered, errListFiltered := controlProcedure(server, UserId, 0, "Rbh", PlantNoToRbhStandard...)
+	if len(errListFiltered) > 0 {
+		for i, err := range errListFiltered {
+			if err != nil {
+				LogError(PlantNoToRbhStandard[i], "RbhStandard", err.Error())
+				for j, p := range PlantNo {
+					if PlantNoToRbhStandard[i] == p {
+						errList[j] = err
+					}
+				}
+			} else if rbhStandardFiltered[i] {
+				for j, p := range PlantNo {
+					if PlantNoToRbhStandard[i] == p {
+						rbhStandard[j] = true
+					}
+				}
+			}
+		}
+	}
+	return rbhStandard, errList
+}

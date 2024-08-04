@@ -320,12 +320,12 @@ func TestReset(t *testing.T) {
 }
 
 func TestGetRbhStateText(t *testing.T) {
-	states := []uint32{RbhNoAccess, RbhAutoDeicingAllowed + RbhInstalled, RbhAutoOff + RbhInstalled, RbhAutoOff + RbhManualOnSCADA + RbhInstalled}
+	states := []uint32{RbhNoAccess, RbhAutoDeicingAllowed + RbhInstalled, RbhAutoOffWEA + RbhInstalled, RbhAutoOffWEA + RbhManualOnSCADA + RbhInstalled}
 	expected := [][]string{
 		{RbhStatus[RbhNoAccess]},
 		{RbhStatus[RbhAutoDeicingAllowed], RbhStatus[RbhInstalled]},
-		{RbhStatus[RbhAutoOff], RbhStatus[RbhInstalled]},
-		{RbhStatus[RbhAutoOff], RbhStatus[RbhManualOnSCADA], RbhStatus[RbhInstalled]},
+		{RbhStatus[RbhAutoOffWEA], RbhStatus[RbhInstalled]},
+		{RbhStatus[RbhAutoOffWEA], RbhStatus[RbhManualOnSCADA], RbhStatus[RbhInstalled]},
 	}
 	var bErr bool
 	for i, state := range states {
@@ -354,8 +354,8 @@ func TestGetRbhStateText(t *testing.T) {
 func TestRbhStatusRight(t *testing.T) {
 	actual := []uint32{
 		RbhInstalled + RbhAutoDeicingAllowed,
-		RbhInstalled + RbhAutoOff,
-		RbhInstalled + RbhAutoOff + RbhManualOnSCADA,
+		RbhInstalled + RbhAutoOffWEA,
+		RbhInstalled + RbhAutoOffWEA + RbhManualOnSCADA,
 		RbhInstalled + RbhAutoDeicingAllowed + RbhHeatingInOperationSCADA,
 	}
 	desired := []uint32{0, 2, 10}
@@ -420,7 +420,97 @@ func TestRbhOn(t *testing.T) {
 		var bErr bool
 		for i, r := range rbhOn {
 			if !r {
-				t.Errorf("Error:Rbh of Plant %d did not start", PlantNo[i])
+				t.Errorf("Error: Rbh of Plant %d did not start", PlantNo[i])
+				bErr = true
+			}
+		}
+		if !bErr {
+			t.Log("Test passed")
+		}
+	}
+}
+
+func TestRbhAutoOff(t *testing.T) {
+	err := godotenv.Load()
+	if err != nil {
+		t.Fatal("Error loading .env file")
+	}
+	OPCIP := os.Getenv("IP")
+	OPCPort := os.Getenv("PORT")
+
+	Server := gopcxmlda.Server{
+		Addr:     OPCIP,
+		Port:     OPCPort,
+		LocaleID: "en-us",
+		Timeout:  10,
+	}
+	userIdStr := os.Getenv("USERID")
+	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
+	PlantNo := []uint8{2}
+	rbhAutoOff, errList := RbhAutoOff(Server, UserId, PlantNo...)
+	if len(errList) > 0 {
+		for _, err := range errList {
+			if err != nil {
+				t.Errorf("Error: %s", err)
+			}
+		}
+	}
+	if len(rbhAutoOff) == 0 {
+		t.Errorf("Return Value of \"rbhAutoOff\" empty")
+	} else {
+		// check if returned values indicate rbhAutoOff plants
+		var bErr bool
+		for i, r := range rbhAutoOff {
+			if !r {
+				t.Errorf("Error: Can't set Rbh of Plant %d to AutoOff", PlantNo[i])
+				bErr = true
+			}
+		}
+		if !bErr {
+			t.Log("Test passed")
+		}
+	}
+}
+
+func TestRbhStandard(t *testing.T) {
+	err := godotenv.Load()
+	if err != nil {
+		t.Fatal("Error loading .env file")
+	}
+	OPCIP := os.Getenv("IP")
+	OPCPort := os.Getenv("PORT")
+
+	Server := gopcxmlda.Server{
+		Addr:     OPCIP,
+		Port:     OPCPort,
+		LocaleID: "en-us",
+		Timeout:  10,
+	}
+	userIdStr := os.Getenv("USERID")
+	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
+	PlantNo := []uint8{2}
+	rbhStandard, errList := RbhStandard(Server, UserId, PlantNo...)
+	if len(errList) > 0 {
+		for _, err := range errList {
+			if err != nil {
+				t.Errorf("Error: %s", err)
+			}
+		}
+	}
+	if len(rbhStandard) == 0 {
+		t.Errorf("Return Value of \"rbhStandard\" empty")
+	} else {
+		// check if returned values indicate rbhStandard plants
+		var bErr bool
+		for i, r := range rbhStandard {
+			if !r {
+				t.Errorf("Error: Can't set Rbh of Plant %d to Standard", PlantNo[i])
 				bErr = true
 			}
 		}

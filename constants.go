@@ -33,7 +33,7 @@ var sessionStates = map[uint32]string{
 const (
 	RbhNoAccess                  = uint32(0)       // No Access on Rbh
 	RbhAutoDeicingAllowed        = uint32(1)       // Automatic deicing allowed
-	RbhAutoOff                   = uint32(1 << 1)  // Automatic operation of the heater suppressed
+	RbhAutoOffWEA                = uint32(1 << 1)  // Automatic operation of the heater suppressed
 	RbhManualOnWEA               = uint32(1 << 2)  // RBH manually on (inside plant)
 	RbhManualOnSCADA             = uint32(1 << 3)  // RBH manually on (SCADA)
 	RbhAutoDeicingWhenStopped    = uint32(1 << 4)  // Automatic deicing when the system is stopped
@@ -52,7 +52,7 @@ const (
 var RbhStatus = map[uint32]string{
 	RbhNoAccess:                  "No Access on Rbh",
 	RbhAutoDeicingAllowed:        "Automatic deicing allowed",
-	RbhAutoOff:                   "Automatic operation of the heater suppressed",
+	RbhAutoOffWEA:                "Automatic operation of the heater suppressed",
 	RbhManualOnWEA:               "RBH manually on (inside plant)",
 	RbhManualOnSCADA:             "RBH manually on (SCADA)",
 	RbhAutoDeicingWhenStopped:    "Automatic deicing when the system is stopped",

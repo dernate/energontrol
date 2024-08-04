@@ -95,7 +95,7 @@ func rbhStatusRight(actual uint32, desired uint32) bool {
 	case 0:
 		// We can only set 0, 2, and 2+8=10. So, check if 2 is set, if not,
 		// then the blade heater is also not running because we can't change that.
-		return actual&RbhAutoOff == 0
+		return actual&RbhAutoOffWEA == 0
 	case 2:
 		// With desired==2 (suppress automatic), neither bit 2^1 nor bit 2^8 should be present.
 		// Therefore, ((actual & 8) XOR (actual & 2)) && !(actual & 8)
@@ -105,7 +105,7 @@ func rbhStatusRight(actual uint32, desired uint32) bool {
 		   1     |     0     |    1    // Shouldn't technically occur, but is caught by "&& !(actual & 8)"
 		   1     |     1     |    0
 		*/
-		return (actual&RbhManualOnSCADA != 0) != ((actual&RbhAutoOff) != 0) && (actual&RbhManualOnSCADA) == 0
+		return (actual&RbhManualOnSCADA != 0) != ((actual&RbhAutoOffWEA) != 0) && (actual&RbhManualOnSCADA) == 0
 		//return ((bool)(ist & 8) ^ (bool)(ist & 2)) && !((bool)(ist & 8));
 	case 10:
 		// Check if any of the bits 2^2 to 2^8 are set and that no interfering bits are set.
