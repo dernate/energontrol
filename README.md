@@ -12,6 +12,7 @@ The following Functions are not yet implemented:
 - [ ] RbhOn
 - [ ] RbhAutoOff
 - [ ] RbhStandard
+- [ ] ControlAndRbh
 - [ ] Turbines
 
 ### Basic Procedure
@@ -66,18 +67,28 @@ PlantNo := []uint8{2, 4}
 resetted, errList := Reset(Server, UserId, PlantNo...)
 ```
 
-### RbhOn(Server, PlantNo...)
+### RbhOn(Server, UserId, PlantNo...)
 Set the Rotor Blade Heating to "Manual On".
 
-Example: ...
+Example:
+```go
+UserId := 1234
+PlantNo := []uint8{2, 4}
+rbhOn, errList := RbhOn(Server, UserId, PlantNo...)
+```
 
-### RbhAutoOff(Server, PlantNo...)
+### RbhAutoOff(Server, UserId, PlantNo...)
 Set the Rotor Blade Heating to "Auto Off" (Supress Automatic -> Off).
 
 Example: ...
 
-### RbhStandard(Server, PlantNo...)
+### RbhStandard(Server, UserId, PlantNo...)
 Set the Rotor Blade Heating to "Standard".
+
+Example: ...
+
+### ControlAndRbh(Server, UserId, CtrlValue, RbhValue, PlantNo)
+Set Ctrl and Rbh value for one plant at once.
 
 Example: ...
 

@@ -5,6 +5,7 @@ import (
 	"github.com/dernate/gopcxmlda"
 	"github.com/joho/godotenv"
 	"os"
+	"sort"
 	"strconv"
 	"testing"
 	"time"
@@ -33,25 +34,25 @@ func TestAvailable(t *testing.T) {
 }
 
 func TestSetAction(t *testing.T) {
-	plantState := []PlantCtrlState{
+	plantState := []PlantState{
 		{PlantNo: 2, CtrlState: 0},
 		{PlantNo: 4, CtrlState: 1},
 		{PlantNo: 5, CtrlState: 2},
 	}
 	setActionToStop(&plantState, true, CtrlValues["Stop60"])
-	plantState2 := []PlantCtrlState{
+	plantState2 := []PlantState{
 		{PlantNo: 2, CtrlState: 0},
 		{PlantNo: 4, CtrlState: 1},
 		{PlantNo: 5, CtrlState: 2},
 	}
 	setActionToStop(&plantState2, true, CtrlValues["Stop"])
-	plantState3 := []PlantCtrlState{
+	plantState3 := []PlantState{
 		{PlantNo: 2, CtrlState: 0},
 		{PlantNo: 4, CtrlState: 1},
 		{PlantNo: 5, CtrlState: 2},
 	}
 	setActionToStop(&plantState3, false, CtrlValues["Stop60"])
-	plantState4 := []PlantCtrlState{
+	plantState4 := []PlantState{
 		{PlantNo: 2, CtrlState: 0},
 		{PlantNo: 4, CtrlState: 1},
 		{PlantNo: 5, CtrlState: 1},
@@ -241,7 +242,7 @@ func TestSessionState(t *testing.T) {
 		Timeout:  10,
 	}
 	PlantNo := []uint8{1, 3, 4}
-	WaitFor := WaitForSessionState{}
+	WaitFor := WaitForState{}
 	s, err := sessionState(Server, "Ctrl", WaitFor, PlantNo...)
 	if err != nil {
 		t.Errorf("Error: %s", err)
@@ -252,7 +253,7 @@ func TestSessionState(t *testing.T) {
 }
 
 func TestGetSessionStateText(t *testing.T) {
-	states := []uint16{0, 1, 2, 4, 5, 175, 234}
+	states := []uint32{0, 1, 2, 4, 5, 175, 234}
 	expected := []string{
 		"Session is Session free",
 		"Session is Session reserved",
@@ -314,6 +315,117 @@ func TestReset(t *testing.T) {
 			t.Log("Test passed")
 		} else {
 			t.Error("Test failed")
+		}
+	}
+}
+
+func TestGetRbhStateText(t *testing.T) {
+	states := []uint32{RbhNoAccess, RbhAutoDeicingAllowed + RbhInstalled, RbhAutoOff + RbhInstalled, RbhAutoOff + RbhManualOnSCADA + RbhInstalled}
+	expected := [][]string{
+		{RbhStatus[RbhNoAccess]},
+		{RbhStatus[RbhAutoDeicingAllowed], RbhStatus[RbhInstalled]},
+		{RbhStatus[RbhAutoOff], RbhStatus[RbhInstalled]},
+		{RbhStatus[RbhAutoOff], RbhStatus[RbhManualOnSCADA], RbhStatus[RbhInstalled]},
+	}
+	var bErr bool
+	for i, state := range states {
+		s := getRbhStateText(state)
+		if len(s) != len(expected[i]) {
+			t.Errorf("Error: %s ; %s", s, expected[i])
+			bErr = true
+		} else {
+			sort.Strings(s)
+			sort.Strings(expected[i])
+			// check if the same values are in the slices
+			for j := range s {
+				if s[j] != expected[i][j] {
+					t.Errorf("Error: %s ; %s", s, expected[i])
+					bErr = true
+					break
+				}
+			}
+		}
+	}
+	if !bErr {
+		t.Log("Test passed")
+	}
+}
+
+func TestRbhStatusRight(t *testing.T) {
+	actual := []uint32{
+		RbhInstalled + RbhAutoDeicingAllowed,
+		RbhInstalled + RbhAutoOff,
+		RbhInstalled + RbhAutoOff + RbhManualOnSCADA,
+		RbhInstalled + RbhAutoDeicingAllowed + RbhHeatingInOperationSCADA,
+	}
+	desired := []uint32{0, 2, 10}
+	ret1 := rbhStatusRight(actual[0], desired[0])
+	ret2 := rbhStatusRight(actual[0], desired[1])
+	ret3 := rbhStatusRight(actual[0], desired[2])
+	if !ret1 || ret2 || ret3 {
+		t.Errorf("Error: %t ; %t ; %t", ret1, ret2, ret3)
+	}
+	ret1 = rbhStatusRight(actual[1], desired[0])
+	ret2 = rbhStatusRight(actual[1], desired[1])
+	ret3 = rbhStatusRight(actual[1], desired[2])
+	if ret1 || !ret2 || ret3 {
+		t.Errorf("Error: %t ; %t ; %t", ret1, ret2, ret3)
+	}
+	ret1 = rbhStatusRight(actual[2], desired[0])
+	ret2 = rbhStatusRight(actual[2], desired[1])
+	ret3 = rbhStatusRight(actual[2], desired[2])
+	if ret1 || ret2 || !ret3 {
+		t.Errorf("Error: %t ; %t ; %t", ret1, ret2, ret3)
+	}
+	ret1 = rbhStatusRight(actual[3], desired[0])
+	ret2 = rbhStatusRight(actual[3], desired[1])
+	ret3 = rbhStatusRight(actual[3], desired[2])
+	if !ret1 || ret2 || !ret3 {
+		t.Errorf("Error: %t ; %t ; %t", ret1, ret2, ret3)
+	}
+}
+
+func TestRbhOn(t *testing.T) {
+	err := godotenv.Load()
+	if err != nil {
+		t.Fatal("Error loading .env file")
+	}
+	OPCIP := os.Getenv("IP")
+	OPCPort := os.Getenv("PORT")
+
+	Server := gopcxmlda.Server{
+		Addr:     OPCIP,
+		Port:     OPCPort,
+		LocaleID: "en-us",
+		Timeout:  10,
+	}
+	userIdStr := os.Getenv("USERID")
+	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
+	PlantNo := []uint8{2}
+	rbhOn, errList := RbhOn(Server, UserId, PlantNo...)
+	if len(errList) > 0 {
+		for _, err := range errList {
+			if err != nil {
+				t.Errorf("Error: %s", err)
+			}
+		}
+	}
+	if len(rbhOn) == 0 {
+		t.Errorf("Return Value of \"rbhOn\" empty")
+	} else {
+		// check if returned values indicate rbhOn plants
+		var bErr bool
+		for i, r := range rbhOn {
+			if !r {
+				t.Errorf("Error:Rbh of Plant %d did not start", PlantNo[i])
+				bErr = true
+			}
+		}
+		if !bErr {
+			t.Log("Test passed")
 		}
 	}
 }

@@ -17,7 +17,10 @@ func serverAvailable(Server gopcxmlda.Server) (bool, error) {
 	return status.Body.GetStatusResponse.GetStatusResult.ServerState == "running", nil
 }
 
-func getPlantCtrlState(Server gopcxmlda.Server, PlantNo []uint8) ([]PlantCtrlState, error) {
+func getPlantCtrlOrRbhState(Server gopcxmlda.Server, CtrlOrRbh string, PlantNo []uint8) ([]PlantState, error) {
+	if CtrlOrRbh != "Ctrl" && CtrlOrRbh != "Rbh" {
+		return nil, fmt.Errorf("CtrlOrRbh must be either Ctrl or Rbh")
+	}
 	// check plant ctrl state
 	var handle1 string
 	var handle2 []string
@@ -27,23 +30,23 @@ func getPlantCtrlState(Server gopcxmlda.Server, PlantNo []uint8) ([]PlantCtrlSta
 	var items []gopcxmlda.T_Item
 	for _, plant := range PlantNo {
 		items = append(items, gopcxmlda.T_Item{
-			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/Ctrl", plant),
+			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/%s", plant, CtrlOrRbh),
 		})
 	}
 	value, err := Server.Read(items, &handle1, &handle2, "", options)
 	if err != nil {
 		return nil, err
 	} else {
-		plantState := make([]PlantCtrlState, len(PlantNo))
+		plantState := make([]PlantState, len(PlantNo))
 		for i, item := range value.Body.ReadResponse.RItemList.Items {
 			plantState[i].PlantNo = PlantNo[i]
-			plantState[i].CtrlState = item.Value.Value.(uint64)
+			plantState[i].CtrlState = item.Value.Value.(uint32)
 		}
 		return plantState, nil
 	}
 }
 
-func setActionToStart(plantState *[]PlantCtrlState) {
+func setActionToStart(plantState *[]PlantState) {
 	for i, state := range *plantState {
 		// If CtrlState is 0, the plant is already started.
 		// If CtrlState is 129 or above, we can't start the plant.
@@ -56,7 +59,7 @@ func setActionToStart(plantState *[]PlantCtrlState) {
 	}
 }
 
-func setActionToStop(plantState *[]PlantCtrlState, ForceExplicitCommand bool, Action uint64) {
+func setActionToStop(plantState *[]PlantState, ForceExplicitCommand bool, Action uint32) {
 	for i, state := range *plantState {
 		// If CtrlState is 129 or 130, the plant is already stopped, but we can't force a change.
 		// If CtrlState is 255, no one can change the state.
@@ -75,20 +78,73 @@ func setActionToStop(plantState *[]PlantCtrlState, ForceExplicitCommand bool, Ac
 	}
 }
 
-func controlProcedure(Server gopcxmlda.Server, UserId uint64, CtrlValue uint64, PlantNo ...uint8) ([]bool, []error) {
+func setActionRbh(plantState *[]PlantState, Action uint32) {
+	for i, state := range *plantState {
+		if rbhStatusRight(state.CtrlState, Action) {
+			(*plantState)[i].Action = false
+		} else {
+			(*plantState)[i].Action = true
+		}
+	}
+}
+
+func rbhStatusRight(actual uint32, desired uint32) bool {
+	RbhBitMaskThatIndicatesRbhIsRunning := RbhManualOnWEA | RbhManualOnSCADA | RbhAutoDeicingWhenStopped | RbhAutoDeicingInOperation | RbhHeatingPreventiveAuto | RbhHeatingWhenStoppedSCADA | RbhHeatingInOperationSCADA
+	RbhBitMaskThatIndicateFailure := RbhNotInstalled | RbhNoSupplyPowerAvailable | RbhFault
+	switch desired {
+	case 0:
+		// We can only set 0, 2, and 2+8=10. So, check if 2 is set, if not,
+		// then the blade heater is also not running because we can't change that.
+		return actual&RbhAutoOff == 0
+	case 2:
+		// With desired==2 (suppress automatic), neither bit 2^1 nor bit 2^8 should be present.
+		// Therefore, ((actual & 8) XOR (actual & 2)) && !(actual & 8)
+		/* (actual & 8) | (actual & 2) | A XOR B
+		   0     |     0     |    0
+		   0     |     1     |    1
+		   1     |     0     |    1    // Shouldn't technically occur, but is caught by "&& !(actual & 8)"
+		   1     |     1     |    0
+		*/
+		return (actual&RbhManualOnSCADA != 0) != ((actual&RbhAutoOff) != 0) && (actual&RbhManualOnSCADA) == 0
+		//return ((bool)(ist & 8) ^ (bool)(ist & 2)) && !((bool)(ist & 8));
+	case 10:
+		// Check if any of the bits 2^2 to 2^8 are set and that no interfering bits are set.
+		return (actual&RbhBitMaskThatIndicatesRbhIsRunning) != 0 && (actual&RbhBitMaskThatIndicateFailure) == 0
+		//return (St & 508) && !(St & 68608);
+	default:
+		return false
+	}
+}
+
+func controlProcedure(Server gopcxmlda.Server, UserId uint64, CtrlOrRbhValue uint32, CtrlOrRbh string, PlantNo ...uint8) ([]bool, []error) {
 	var success []bool
 	var errList []error
 	SessionType := "Ctrl"
-	var Action string
-	for _action, _CtrlValue := range CtrlValues {
-		if _CtrlValue == CtrlValue {
-			Action = _action
-			break
+	var ControlType string
+	var Action string // Text for the Ctrl/Rbh Value
+	if CtrlOrRbh != "Ctrl" && CtrlOrRbh != "Rbh" {
+		return nil, []error{fmt.Errorf("CtrlOrRbh must be either Ctrl or Rbh")}
+	}
+	if CtrlOrRbh == "Ctrl" {
+		ControlType = "Ctrl"
+		for _action, _CtrlValue := range CtrlValues {
+			if _CtrlValue == CtrlOrRbhValue {
+				Action = _action
+				break
+			}
+		}
+	} else {
+		ControlType = "Rbh"
+		for _action, _RbhValue := range RbhValues {
+			if _RbhValue == uint64(CtrlOrRbhValue) {
+				Action = _action
+				break
+			}
 		}
 	}
 	if Action == "" {
 		for range PlantNo {
-			errList = append(errList, fmt.Errorf("CtrlValue (%d) cannot be set because it is invalid", CtrlValue))
+			errList = append(errList, fmt.Errorf("CtrlValue (%d) cannot be set because it is invalid", CtrlOrRbhValue))
 		}
 		return nil, errList
 	}
@@ -96,7 +152,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, CtrlValue uint64, 
 		return nil, nil
 	}
 	// Get session state
-	SesState, err := sessionState(Server, SessionType, WaitForSessionState{}, PlantNo...)
+	SesState, err := sessionState(Server, SessionType, WaitForState{}, PlantNo...)
 	if err != nil {
 		for range PlantNo {
 			errList = append(errList, err)
@@ -120,7 +176,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, CtrlValue uint64, 
 			continue
 		}
 		// Get new Session State
-		WaitFor := WaitForSessionState{
+		WaitFor := WaitForState{
 			Desired: 1,
 			Sleep:   100 * time.Millisecond,
 			Retries: 10,
@@ -144,14 +200,14 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, CtrlValue uint64, 
 			success = append(success, false)
 			continue
 		}
-		err = writeControlValue(Server, PlantNo[i], CtrlValue, SessionRequestValues.PrivateKey, PublicKey, SessionType)
+		err = writeControlValue(Server, PlantNo[i], CtrlOrRbhValue, SessionRequestValues.PrivateKey, PublicKey, ControlType)
 		if err != nil {
 			errList = append(errList, err)
 			success = append(success, false)
 			continue
 		}
 		// Get new Session State
-		WaitFor = WaitForSessionState{
+		WaitFor = WaitForState{
 			Desired: 2,
 			Sleep:   100 * time.Millisecond,
 			Retries: 10,
@@ -176,7 +232,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, CtrlValue uint64, 
 			continue
 		}
 		// Get new Session State
-		WaitFor = WaitForSessionState{
+		WaitFor = WaitForState{
 			Desired: 4,
 			Sleep:   100 * time.Millisecond,
 			Retries: 10,
@@ -194,6 +250,9 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, CtrlValue uint64, 
 			success = append(success, false)
 			continue
 		} else {
+			if WaitFor.Retries > 0 {
+
+			}
 			errList = append(errList, nil)
 			success = append(success, true)
 		}
@@ -202,7 +261,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, CtrlValue uint64, 
 }
 
 // Get the session state of a plant
-func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForSessionState, PlantNo ...uint8) ([]uint16, error) {
+func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForState, PlantNo ...uint8) ([]uint32, error) {
 	if CtrlOrReset != "Ctrl" && CtrlOrReset != "Reset" {
 		return nil, fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
@@ -216,8 +275,6 @@ func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForSe
 	var handle1 string
 	var handle2 []string
 	options := map[string]interface{}{
-		"ReturnItemTime": true,
-		"returnItemPath": true,
 		"returnItemName": true,
 	}
 	var value gopcxmlda.T_Read
@@ -228,7 +285,7 @@ func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForSe
 			return nil, err
 		}
 		if len(PlantNo) == 1 && WaitFor.Retries > 0 {
-			if WaitFor.Desired == value.Body.ReadResponse.RItemList.Items[0].Value.Value.(uint16) {
+			if WaitFor.Desired == value.Body.ReadResponse.RItemList.Items[0].Value.Value.(uint32) {
 				break
 			} else {
 				time.Sleep(WaitFor.Sleep)
@@ -237,19 +294,33 @@ func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForSe
 			break
 		}
 	}
-	var bSessionState []uint16
+	var bSessionState []uint32
 	for _, item := range value.Body.ReadResponse.RItemList.Items {
-		bSessionState = append(bSessionState, item.Value.Value.(uint16))
+		bSessionState = append(bSessionState, item.Value.Value.(uint32))
 	}
 	return bSessionState, nil
 }
 
-func getSessionStateText(state uint16) string {
+func getSessionStateText(state uint32) string {
 	if stateText, exists := sessionStates[state]; exists {
 		return fmt.Sprintf("Session is '%s'", stateText)
 	} else {
 		return "Unknown session state"
 	}
+}
+
+func getRbhStateText(state uint32) []string {
+	var st []string
+	if state == 0 {
+		return []string{RbhStatus[RbhNoAccess]}
+	}
+	// Überprüfen der Bitmasken und Hinzufügen der entsprechenden Nachrichten
+	for mask, message := range RbhStatus {
+		if state&mask != 0 {
+			st = append(st, message)
+		}
+	}
+	return st
 }
 
 func generateSessionRequest(UserId uint64) SessionRequest {
@@ -296,8 +367,6 @@ func getPublicKey(Server gopcxmlda.Server, PlantNo uint8, CtrlOrReset string) (u
 	var handle1 string
 	var handle2 []string
 	options := map[string]interface{}{
-		"ReturnItemTime": true,
-		"returnItemPath": true,
 		"returnItemName": true,
 	}
 	items := []gopcxmlda.T_Item{
@@ -315,7 +384,7 @@ func getPublicKey(Server gopcxmlda.Server, PlantNo uint8, CtrlOrReset string) (u
 	}
 }
 
-func writeControlValue(Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint64, PrivateKey uint16, PublicKey uint64, CtrlOrRbh string) error {
+func writeControlValue(Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint32, PrivateKey uint16, PublicKey uint64, CtrlOrRbh string) error {
 	if CtrlOrRbh != "Ctrl" && CtrlOrRbh != "Rbh" {
 		return fmt.Errorf("CtrlOrRbh must be either Ctrl or Rbh")
 	}
@@ -323,7 +392,7 @@ func writeControlValue(Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint64,
 		{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/Set%s", PlantNo, CtrlOrRbh),
 			Value: gopcxmlda.T_Value{
-				Value: []uint64{CtrlValue, uint64(PrivateKey), PublicKey},
+				Value: []uint64{uint64(CtrlValue), uint64(PrivateKey), PublicKey},
 			},
 		},
 	}
@@ -402,7 +471,7 @@ func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([
 		return nil, nil
 	}
 	// Get session state
-	SesState, err := sessionState(Server, SessionType, WaitForSessionState{}, PlantNo...)
+	SesState, err := sessionState(Server, SessionType, WaitForState{}, PlantNo...)
 	if err != nil {
 		for range PlantNo {
 			errList = append(errList, err)
@@ -426,7 +495,7 @@ func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([
 			continue
 		}
 		// Get new Session State
-		WaitFor := WaitForSessionState{
+		WaitFor := WaitForState{
 			Desired: 1,
 			Sleep:   100 * time.Millisecond,
 			Retries: 10,
@@ -458,7 +527,7 @@ func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([
 			continue
 		}
 		// Get new Session State
-		WaitFor = WaitForSessionState{
+		WaitFor = WaitForState{
 			Desired: 2,
 			Sleep:   100 * time.Millisecond,
 			Retries: 10,
@@ -483,7 +552,7 @@ func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([
 			continue
 		}
 		// Get new Session State
-		WaitFor = WaitForSessionState{
+		WaitFor = WaitForState{
 			Desired: 4,
 			Sleep:   100 * time.Millisecond,
 			Retries: 10,

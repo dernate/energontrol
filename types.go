@@ -2,9 +2,9 @@ package energontrol
 
 import "time"
 
-type PlantCtrlState struct {
+type PlantState struct {
 	PlantNo   uint8
-	CtrlState uint64
+	CtrlState uint32
 	Action    bool
 }
 
@@ -14,8 +14,8 @@ type SessionRequest struct {
 	PrivateKey uint16
 }
 
-type WaitForSessionState struct {
-	Desired uint16
+type WaitForState struct {
+	Desired uint32
 	Sleep   time.Duration
 	Retries uint
 }
