@@ -10,9 +10,9 @@ The following Functions are implemented:
 - [ ] RbhOn
 - [ ] RbhAutoOff
 - [ ] RbhStandard
+- [ ] ControlAndRbh
 
 The following Functions are not yet implemented:
-- [ ] ControlAndRbh
 - [ ] Turbines
 
 ### Basic Procedure
