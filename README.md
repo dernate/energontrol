@@ -97,10 +97,22 @@ PlantNo := []uint8{2, 4}
 rbhStandard, errList := RbhStandard(Server, UserId, PlantNo...)
 ```
 
-### ControlAndRbh(Server, UserId, CtrlValue, RbhValue, PlantNo)
-Set Ctrl and Rbh value for one plant at once.
+### ControlAndRbh(Server, UserId, Values, PlantNo...)
+Set Ctrl and Rbh value for one plant at once. The CtrlValue and RbhValue are the numbers, which will be set in the OPC.
+See constants.go for the possible values.
 
-Example: ...
+Example:
+```go
+UserId := 1234
+Values := ControlAndRbhValue{
+		SetCtrlValue: true,
+		CtrlValue:    1,
+		SetRbhValue:  true,
+		RbhValue:     2,
+	}
+PlantNo := []uint8{2, 4}
+controlled, errList := ControlAndRbh(Server, UserId, Values, PlantNo...)
+```
 
 ### Turbines(Server)
 Get a list of turbines and which controls are available for each turbine.

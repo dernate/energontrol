@@ -4,7 +4,7 @@ import "time"
 
 type PlantState struct {
 	PlantNo   uint8
-	CtrlState uint32
+	CtrlState uint64
 	Action    bool
 }
 
@@ -15,7 +15,16 @@ type SessionRequest struct {
 }
 
 type WaitForState struct {
-	Desired uint32
+	Desired uint16
 	Sleep   time.Duration
 	Retries uint
+}
+
+type ControlAndRbhValue struct {
+	SetCtrlValue bool
+	CtrlValue    uint64
+	CtrlAction   []bool
+	SetRbhValue  bool
+	RbhValue     uint64
+	RbhAction    []bool
 }

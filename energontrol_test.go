@@ -253,7 +253,7 @@ func TestSessionState(t *testing.T) {
 }
 
 func TestGetSessionStateText(t *testing.T) {
-	states := []uint32{0, 1, 2, 4, 5, 175, 234}
+	states := []uint16{0, 1, 2, 4, 5, 175, 234}
 	expected := []string{
 		"Session is Session free",
 		"Session is Session reserved",
@@ -320,7 +320,7 @@ func TestReset(t *testing.T) {
 }
 
 func TestGetRbhStateText(t *testing.T) {
-	states := []uint32{RbhNoAccess, RbhAutoDeicingAllowed + RbhInstalled, RbhAutoOffWEA + RbhInstalled, RbhAutoOffWEA + RbhManualOnSCADA + RbhInstalled}
+	states := []uint64{RbhNoAccess, RbhAutoDeicingAllowed + RbhInstalled, RbhAutoOffWEA + RbhInstalled, RbhAutoOffWEA + RbhManualOnSCADA + RbhInstalled}
 	expected := [][]string{
 		{RbhStatus[RbhNoAccess]},
 		{RbhStatus[RbhAutoDeicingAllowed], RbhStatus[RbhInstalled]},
@@ -352,13 +352,13 @@ func TestGetRbhStateText(t *testing.T) {
 }
 
 func TestRbhStatusRight(t *testing.T) {
-	actual := []uint32{
+	actual := []uint64{
 		RbhInstalled + RbhAutoDeicingAllowed,
 		RbhInstalled + RbhAutoOffWEA,
 		RbhInstalled + RbhAutoOffWEA + RbhManualOnSCADA,
 		RbhInstalled + RbhAutoDeicingAllowed + RbhHeatingInOperationSCADA,
 	}
-	desired := []uint32{0, 2, 10}
+	desired := []uint64{0, 2, 10}
 	ret1 := rbhStatusRight(actual[0], desired[0])
 	ret2 := rbhStatusRight(actual[0], desired[1])
 	ret3 := rbhStatusRight(actual[0], desired[2])
@@ -404,7 +404,7 @@ func TestRbhOn(t *testing.T) {
 	if err != nil {
 		t.Errorf("Error: %s", err)
 	}
-	PlantNo := []uint8{2}
+	PlantNo := []uint8{4}
 	rbhOn, errList := RbhOn(Server, UserId, PlantNo...)
 	if len(errList) > 0 {
 		for _, err := range errList {
@@ -449,7 +449,7 @@ func TestRbhAutoOff(t *testing.T) {
 	if err != nil {
 		t.Errorf("Error: %s", err)
 	}
-	PlantNo := []uint8{2}
+	PlantNo := []uint8{4}
 	rbhAutoOff, errList := RbhAutoOff(Server, UserId, PlantNo...)
 	if len(errList) > 0 {
 		for _, err := range errList {
@@ -494,7 +494,7 @@ func TestRbhStandard(t *testing.T) {
 	if err != nil {
 		t.Errorf("Error: %s", err)
 	}
-	PlantNo := []uint8{2}
+	PlantNo := []uint8{4}
 	rbhStandard, errList := RbhStandard(Server, UserId, PlantNo...)
 	if len(errList) > 0 {
 		for _, err := range errList {
@@ -517,5 +517,89 @@ func TestRbhStandard(t *testing.T) {
 		if !bErr {
 			t.Log("Test passed")
 		}
+	}
+}
+
+func TestControlAndRbh1(t *testing.T) {
+	err := godotenv.Load()
+	if err != nil {
+		t.Fatal("Error loading .env file")
+	}
+	OPCIP := os.Getenv("IP")
+	OPCPort := os.Getenv("PORT")
+
+	Server := gopcxmlda.Server{
+		Addr:     OPCIP,
+		Port:     OPCPort,
+		LocaleID: "en-us",
+		Timeout:  10,
+	}
+	userIdStr := os.Getenv("USERID")
+	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
+	PlantNo := []uint8{2, 5}
+	Values := ControlAndRbhValue{
+		SetCtrlValue: true,
+		CtrlValue:    1,
+		SetRbhValue:  true,
+		RbhValue:     10,
+	}
+	retControlAndRbh, errList := ControlAndRbh(Server, UserId, Values, PlantNo...)
+	var bErr bool
+	if len(errList) > 0 {
+		for _, err := range errList {
+			if err != nil {
+				bErr = true
+				t.Errorf("Error: %s", err)
+			}
+		}
+	}
+	fmt.Println(retControlAndRbh)
+	if !bErr {
+		t.Log("Test passed")
+	}
+}
+
+func TestControlAndRbh2(t *testing.T) {
+	err := godotenv.Load()
+	if err != nil {
+		t.Fatal("Error loading .env file")
+	}
+	OPCIP := os.Getenv("IP")
+	OPCPort := os.Getenv("PORT")
+
+	Server := gopcxmlda.Server{
+		Addr:     OPCIP,
+		Port:     OPCPort,
+		LocaleID: "en-us",
+		Timeout:  10,
+	}
+	userIdStr := os.Getenv("USERID")
+	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
+	PlantNo := []uint8{2, 5}
+	Values := ControlAndRbhValue{
+		SetCtrlValue: true,
+		CtrlValue:    0,
+		SetRbhValue:  true,
+		RbhValue:     0,
+	}
+	retControlAndRbh, errList := ControlAndRbh(Server, UserId, Values, PlantNo...)
+	var bErr bool
+	if len(errList) > 0 {
+		for _, err := range errList {
+			if err != nil {
+				bErr = true
+				t.Errorf("Error: %s", err)
+			}
+		}
+	}
+	fmt.Println(retControlAndRbh)
+	if !bErr {
+		t.Log("Test passed")
 	}
 }

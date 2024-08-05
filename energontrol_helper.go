@@ -40,7 +40,7 @@ func getPlantCtrlOrRbhState(Server gopcxmlda.Server, CtrlOrRbh string, PlantNo [
 		plantState := make([]PlantState, len(PlantNo))
 		for i, item := range value.Body.ReadResponse.RItemList.Items {
 			plantState[i].PlantNo = PlantNo[i]
-			plantState[i].CtrlState = item.Value.Value.(uint32)
+			plantState[i].CtrlState = item.Value.Value.(uint64)
 		}
 		return plantState, nil
 	}
@@ -59,7 +59,7 @@ func setActionToStart(plantState *[]PlantState) {
 	}
 }
 
-func setActionToStop(plantState *[]PlantState, ForceExplicitCommand bool, Action uint32) {
+func setActionToStop(plantState *[]PlantState, ForceExplicitCommand bool, Action uint64) {
 	for i, state := range *plantState {
 		// If CtrlState is 129 or 130, the plant is already stopped, but we can't force a change.
 		// If CtrlState is 255, no one can change the state.
@@ -78,7 +78,7 @@ func setActionToStop(plantState *[]PlantState, ForceExplicitCommand bool, Action
 	}
 }
 
-func setActionRbh(plantState *[]PlantState, Action uint32) {
+func setActionRbh(plantState *[]PlantState, Action uint64) {
 	for i, state := range *plantState {
 		if rbhStatusRight(state.CtrlState, Action) {
 			(*plantState)[i].Action = false
@@ -88,7 +88,7 @@ func setActionRbh(plantState *[]PlantState, Action uint32) {
 	}
 }
 
-func rbhStatusRight(actual uint32, desired uint32) bool {
+func rbhStatusRight(actual uint64, desired uint64) bool {
 	RbhBitMaskThatIndicatesRbhIsRunning := RbhManualOnWEA | RbhManualOnSCADA | RbhAutoDeicingWhenStopped | RbhAutoDeicingInOperation | RbhHeatingPreventiveAuto | RbhHeatingWhenStoppedSCADA | RbhHeatingInOperationSCADA
 	RbhBitMaskThatIndicateFailure := RbhNotInstalled | RbhNoSupplyPowerAvailable | RbhFault
 	switch desired {
@@ -116,152 +116,198 @@ func rbhStatusRight(actual uint32, desired uint32) bool {
 	}
 }
 
-func controlProcedure(Server gopcxmlda.Server, UserId uint64, CtrlOrRbhValue uint32, CtrlOrRbh string, PlantNo ...uint8) ([]bool, []error) {
-	var success []bool
-	var errList []error
-	SessionType := "Ctrl"
-	var ControlType string
-	var Action string // Text for the Ctrl/Rbh Value
-	if CtrlOrRbh != "Ctrl" && CtrlOrRbh != "Rbh" {
-		return nil, []error{fmt.Errorf("CtrlOrRbh must be either Ctrl or Rbh")}
-	}
-	if CtrlOrRbh == "Ctrl" {
-		ControlType = "Ctrl"
-		for _action, _CtrlValue := range CtrlValues {
-			if _CtrlValue == CtrlOrRbhValue {
-				Action = _action
-				break
-			}
-		}
-	} else {
-		ControlType = "Rbh"
-		for _action, _RbhValue := range RbhValues {
-			if _RbhValue == uint64(CtrlOrRbhValue) {
-				Action = _action
-				break
-			}
-		}
-	}
-	if Action == "" {
-		for range PlantNo {
-			errList = append(errList, fmt.Errorf("CtrlValue (%d) cannot be set because it is invalid", CtrlOrRbhValue))
-		}
-		return nil, errList
-	}
+func controlProcedure(Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhValue, PlantNo ...uint8) ([]bool, []error) {
 	if len(PlantNo) == 0 {
 		return nil, nil
 	}
-	// Get session state
-	SesState, err := sessionState(Server, SessionType, WaitForState{}, PlantNo...)
-	if err != nil {
-		for range PlantNo {
-			errList = append(errList, err)
+	SessionType := "Ctrl"
+	Action := "" // Action contains specific Ctrl and/or Rbh action descriptions. Used for Logging.
+	if Values.SetCtrlValue {
+		for _action, _CtrlValue := range CtrlValues {
+			if _CtrlValue == Values.CtrlValue {
+				Action = "'Ctrl: " + _action + "'"
+				break
+			}
 		}
-		return nil, errList
 	}
-	for i, _sessionState := range SesState {
-		if _sessionState != 0 {
-			errMsg := fmt.Sprintf("Can't start session, %s", getSessionStateText(_sessionState))
-			LogWarn(PlantNo[i], Action, errMsg)
-			errList = append(errList, fmt.Errorf(errMsg))
-			success = append(success, false)
+	if Values.SetRbhValue {
+		for _action, _RbhValue := range RbhValues {
+			if _RbhValue == Values.RbhValue {
+				if Action != "" {
+					Action += " and "
+				}
+				Action += "'Rbh: " + _action + "'"
+				break
+			}
+		}
+	}
+	var success []bool
+	var errList []error
+	for range PlantNo {
+		errList = append(errList, nil)
+		success = append(success, false)
+	}
+	// Get session state
+	WaitFor := WaitForState{
+		Desired: 0,
+		Sleep:   100 * time.Millisecond,
+		Retries: 10,
+	}
+	SesState, err := sessionState(Server, SessionType, WaitFor, PlantNo...)
+	if err != nil {
+		for i := range errList {
+			errList[i] = err
+			success[i] = false
+		}
+		return success, errList
+	}
+	if len(SesState) != len(PlantNo) {
+		for i := range errList {
+			errList[i] = fmt.Errorf("Session state item count does not match PlantNo")
+			success[i] = false
+		}
+		return success, errList
+	}
+	var SessionRequestValues []SessionRequest
+	for range PlantNo {
+		SessionRequestValues = append(SessionRequestValues, SessionRequest{})
+	}
+	for i, plant := range PlantNo {
+		if SesState[i] != 0 {
+			errMsg := fmt.Sprintf("Can't start session, %s", getSessionStateText(SesState[i]))
+			LogWarn(plant, Action, errMsg)
+			errList[i] = fmt.Errorf(errMsg)
+			success[i] = false
 			continue
 		}
 		// do session request
-		SessionRequestValues := generateSessionRequest(UserId)
-		err := requestSession(Server, SessionRequestValues, PlantNo[i], SessionType)
+		SessionRequestValues[i] = generateSessionRequest(UserId)
+		err = requestSession(Server, SessionRequestValues[i], plant, SessionType)
 		if err != nil {
-			errList = append(errList, err)
-			success = append(success, false)
+			errList[i] = err
+			success[i] = false
+		}
+	}
+	// Get new Session State
+	WaitFor.Desired = 1
+	SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo...)
+	if err != nil {
+		for i := range errList {
+			errList[i] = err
+			success[i] = false
+		}
+		return success, errList
+	}
+	if len(SesState) != len(PlantNo) {
+		for i := range errList {
+			errList[i] = fmt.Errorf("Session state item count does not match PlantNo")
+			success[i] = false
+		}
+		return success, errList
+	}
+	var PublicKeys []uint64
+	for range PlantNo {
+		PublicKeys = append(PublicKeys, 0)
+	}
+	for i, plant := range PlantNo {
+		if SesState[i] != 1 {
+			errMsg := fmt.Sprintf("Session error for Plant %d, %s", plant, getSessionStateText(SesState[i]))
+			LogWarn(plant, Action, errMsg)
+			errList[i] = fmt.Errorf(errMsg)
+			success[i] = false
 			continue
 		}
-		// Get new Session State
-		WaitFor := WaitForState{
-			Desired: 1,
-			Sleep:   100 * time.Millisecond,
-			Retries: 10,
-		}
-		SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo[i])
+		var PublicKey uint64
+		PublicKey, err = getPublicKey(Server, plant, SessionType)
 		if err != nil {
-			errList = append(errList, err)
-			success = append(success, false)
+			PublicKeys[i] = 0
+			errList[i] = err
+			success[i] = false
 			continue
 		}
-		if SesState[0] != 1 {
-			errMsg := fmt.Sprintf("Session error for Plant %d, %s", PlantNo[i], getSessionStateText(SesState[0]))
-			LogWarn(PlantNo[i], Action, errMsg)
-			errList = append(errList, fmt.Errorf(errMsg))
-			success = append(success, false)
-			continue
-		}
-		PublicKey, err := getPublicKey(Server, PlantNo[i], SessionType)
-		if err != nil {
-			errList = append(errList, err)
-			success = append(success, false)
-			continue
-		}
-		err = writeControlValue(Server, PlantNo[i], CtrlOrRbhValue, SessionRequestValues.PrivateKey, PublicKey, ControlType)
-		if err != nil {
-			errList = append(errList, err)
-			success = append(success, false)
-			continue
-		}
-		// Get new Session State
-		WaitFor = WaitForState{
-			Desired: 2,
-			Sleep:   100 * time.Millisecond,
-			Retries: 10,
-		}
-		SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo[i])
-		if err != nil {
-			errList = append(errList, err)
-			success = append(success, false)
-			continue
-		}
-		if SesState[0] != 2 {
-			errMsg := fmt.Sprintf("Session error for Plant %d, %s", PlantNo[i], getSessionStateText(SesState[0]))
-			LogWarn(PlantNo[i], Action, errMsg)
-			errList = append(errList, fmt.Errorf(errMsg))
-			success = append(success, false)
-			continue
-		}
-		err = submitValue(Server, PlantNo[i], SessionRequestValues.PrivateKey, PublicKey, SessionType)
-		if err != nil {
-			errList = append(errList, err)
-			success = append(success, false)
-			continue
-		}
-		// Get new Session State
-		WaitFor = WaitForState{
-			Desired: 4,
-			Sleep:   100 * time.Millisecond,
-			Retries: 10,
-		}
-		SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo[i])
-		if err != nil {
-			errList = append(errList, err)
-			success = append(success, false)
-			continue
-		}
-		if SesState[0] != 4 {
-			errMsg := fmt.Sprintf("Session error for Plant %d, %s", PlantNo[i], getSessionStateText(SesState[0]))
-			LogWarn(PlantNo[i], Action, errMsg)
-			errList = append(errList, fmt.Errorf(errMsg))
-			success = append(success, false)
-			continue
-		} else {
-			if WaitFor.Retries > 0 {
-
+		PublicKeys[i] = PublicKey
+		if Values.SetCtrlValue && Values.CtrlAction[i] {
+			err = writeControlValue(Server, plant, Values.CtrlValue, SessionRequestValues[i].PrivateKey, PublicKey, "Ctrl")
+			if err != nil {
+				errList[i] = err
+				success[i] = false
+				continue
 			}
-			errList = append(errList, nil)
-			success = append(success, true)
 		}
+		if Values.SetRbhValue && Values.RbhAction[i] {
+			err = writeControlValue(Server, plant, Values.RbhValue, SessionRequestValues[i].PrivateKey, PublicKey, "Rbh")
+			if err != nil {
+				errList[i] = err
+				success[i] = false
+				continue
+			}
+		}
+	}
+
+	// Get new Session State
+	WaitFor.Desired = 2
+	SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo...)
+	if err != nil {
+		for i := range errList {
+			errList[i] = err
+			success[i] = false
+		}
+		return success, errList
+	}
+	if len(SesState) != len(PlantNo) {
+		for i := range errList {
+			errList[i] = fmt.Errorf("Session state item count does not match PlantNo")
+			success[i] = false
+		}
+		return success, errList
+	}
+	for i, plant := range PlantNo {
+		if SesState[i] != 2 {
+			errMsg := fmt.Sprintf("Session error for Plant %d, %s", plant, getSessionStateText(SesState[i]))
+			LogWarn(plant, Action, errMsg)
+			errList[i] = fmt.Errorf(errMsg)
+			success[i] = false
+			continue
+		}
+		err = submitValue(Server, plant, SessionRequestValues[i].PrivateKey, PublicKeys[i], SessionType)
+		if err != nil {
+			errList[i] = err
+			success[i] = false
+			continue
+		}
+	}
+	// Get new Session State
+	WaitFor.Desired = 4
+	SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo...)
+	if err != nil {
+		for i := range errList {
+			errList[i] = err
+			success[i] = false
+		}
+		return success, errList
+	}
+	if len(SesState) != len(PlantNo) {
+		for i := range errList {
+			errList[i] = fmt.Errorf("Session state item count does not match PlantNo")
+			success[i] = false
+		}
+		return success, errList
+	}
+	for i, plant := range PlantNo {
+		if SesState[i] != 4 {
+			errMsg := fmt.Sprintf("Session error for Plant %d, %s", plant, getSessionStateText(SesState[i]))
+			LogWarn(plant, Action, errMsg)
+			errList[i] = fmt.Errorf(errMsg)
+			success[i] = false
+			continue
+		}
+		success[i] = true
 	}
 	return success, errList
 }
 
 // Get the session state of a plant
-func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForState, PlantNo ...uint8) ([]uint32, error) {
+func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForState, PlantNo ...uint8) ([]uint16, error) {
 	if CtrlOrReset != "Ctrl" && CtrlOrReset != "Reset" {
 		return nil, fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
@@ -279,29 +325,37 @@ func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForSt
 	}
 	var value gopcxmlda.T_Read
 	var err error
+	var retSessionState []uint16
 	for range WaitFor.Retries + 1 {
 		value, err = Server.Read(stateItems, &handle1, &handle2, "", options)
 		if err != nil {
 			return nil, err
 		}
-		if len(PlantNo) == 1 && WaitFor.Retries > 0 {
-			if WaitFor.Desired == value.Body.ReadResponse.RItemList.Items[0].Value.Value.(uint32) {
-				break
-			} else {
-				time.Sleep(WaitFor.Sleep)
+		if WaitFor.Retries > 0 {
+			bOk := false
+			for _, item := range value.Body.ReadResponse.RItemList.Items {
+				if WaitFor.Desired != item.Value.Value.(uint16) {
+					bOk = false
+					break
+				} else {
+					bOk = true
+				}
 			}
-		} else {
-			break
+			if !bOk {
+				time.Sleep(WaitFor.Sleep)
+				continue
+			} else {
+				break
+			}
 		}
 	}
-	var bSessionState []uint32
 	for _, item := range value.Body.ReadResponse.RItemList.Items {
-		bSessionState = append(bSessionState, item.Value.Value.(uint32))
+		retSessionState = append(retSessionState, item.Value.Value.(uint16))
 	}
-	return bSessionState, nil
+	return retSessionState, nil
 }
 
-func getSessionStateText(state uint32) string {
+func getSessionStateText(state uint16) string {
 	if stateText, exists := sessionStates[state]; exists {
 		return fmt.Sprintf("Session is '%s'", stateText)
 	} else {
@@ -309,7 +363,7 @@ func getSessionStateText(state uint32) string {
 	}
 }
 
-func getRbhStateText(state uint32) []string {
+func getRbhStateText(state uint64) []string {
 	var st []string
 	if state == 0 {
 		return []string{RbhStatus[RbhNoAccess]}
@@ -384,7 +438,7 @@ func getPublicKey(Server gopcxmlda.Server, PlantNo uint8, CtrlOrReset string) (u
 	}
 }
 
-func writeControlValue(Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint32, PrivateKey uint16, PublicKey uint64, CtrlOrRbh string) error {
+func writeControlValue(Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint64, PrivateKey uint16, PublicKey uint64, CtrlOrRbh string) error {
 	if CtrlOrRbh != "Ctrl" && CtrlOrRbh != "Rbh" {
 		return fmt.Errorf("CtrlOrRbh must be either Ctrl or Rbh")
 	}
@@ -392,7 +446,7 @@ func writeControlValue(Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint32,
 		{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/Set%s", PlantNo, CtrlOrRbh),
 			Value: gopcxmlda.T_Value{
-				Value: []uint64{uint64(CtrlValue), uint64(PrivateKey), PublicKey},
+				Value: []uint64{CtrlValue, uint64(PrivateKey), PublicKey},
 			},
 		},
 	}
@@ -575,4 +629,14 @@ func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([
 		}
 	}
 	return success, errList
+}
+
+// allFalse checks if all values in a slice are false
+func allFalse(b []bool) bool {
+	for _, value := range b {
+		if value {
+			return false
+		}
+	}
+	return true
 }

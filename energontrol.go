@@ -44,7 +44,14 @@ func Start(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 		}
 	}
 	// start plants
-	startedFiltered, errListFiltered := controlProcedure(Server, UserId, 0, "Ctrl", PlantNoToStart...)
+	Value := ControlAndRbhValue{
+		SetCtrlValue: true,
+		CtrlValue:    0,
+	}
+	for range PlantNoToStart {
+		Value.CtrlAction = append(Value.CtrlAction, true)
+	}
+	startedFiltered, errListFiltered := controlProcedure(Server, UserId, Value, PlantNoToStart...)
 	if len(errListFiltered) > 0 {
 		for i, err := range errListFiltered {
 			if err != nil {
@@ -79,7 +86,7 @@ func Stop(Server gopcxmlda.Server, UserId uint64, FullStop bool, ForceExplicitCo
 		}
 	}
 	Action := "Stop"
-	var CtrlValue uint32
+	var CtrlValue uint64
 	if FullStop {
 		CtrlValue = 2
 	} else {
@@ -114,7 +121,14 @@ func Stop(Server gopcxmlda.Server, UserId uint64, FullStop bool, ForceExplicitCo
 		}
 	}
 	// stop plants
-	stoppedFiltered, errListFiltered := controlProcedure(Server, UserId, CtrlValue, "Ctrl", PlantNoToStop...)
+	Value := ControlAndRbhValue{
+		SetCtrlValue: true,
+		CtrlValue:    CtrlValue,
+	}
+	for range PlantNoToStop {
+		Value.CtrlAction = append(Value.CtrlAction, true)
+	}
+	stoppedFiltered, errListFiltered := controlProcedure(Server, UserId, Value, PlantNoToStop...)
 	if len(errListFiltered) > 0 {
 		for i, err := range errListFiltered {
 			if err != nil {
@@ -207,7 +221,14 @@ func RbhOn(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 		}
 	}
 	// start Rbh for plants
-	rbhOnFiltered, errListFiltered := controlProcedure(server, UserId, 10, "Rbh", PlantNoToRbhOn...)
+	Value := ControlAndRbhValue{
+		SetRbhValue: true,
+		RbhValue:    10,
+	}
+	for range PlantNoToRbhOn {
+		Value.RbhAction = append(Value.RbhAction, true)
+	}
+	rbhOnFiltered, errListFiltered := controlProcedure(server, UserId, Value, PlantNoToRbhOn...)
 	if len(errListFiltered) > 0 {
 		for i, err := range errListFiltered {
 			if err != nil {
@@ -269,7 +290,14 @@ func RbhAutoOff(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]boo
 		}
 	}
 	// start Rbh for plants
-	rbhAutoOffFiltered, errListFiltered := controlProcedure(server, UserId, 2, "Rbh", PlantNoToRbhAutoOff...)
+	Value := ControlAndRbhValue{
+		SetRbhValue: true,
+		RbhValue:    2,
+	}
+	for range PlantNoToRbhAutoOff {
+		Value.RbhAction = append(Value.RbhAction, true)
+	}
+	rbhAutoOffFiltered, errListFiltered := controlProcedure(server, UserId, Value, PlantNoToRbhAutoOff...)
 	if len(errListFiltered) > 0 {
 		for i, err := range errListFiltered {
 			if err != nil {
@@ -331,7 +359,14 @@ func RbhStandard(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bo
 		}
 	}
 	// start Rbh for plants
-	rbhStandardFiltered, errListFiltered := controlProcedure(server, UserId, 0, "Rbh", PlantNoToRbhStandard...)
+	Value := ControlAndRbhValue{
+		SetRbhValue: true,
+		RbhValue:    0,
+	}
+	for range PlantNoToRbhStandard {
+		Value.RbhAction = append(Value.RbhAction, true)
+	}
+	rbhStandardFiltered, errListFiltered := controlProcedure(server, UserId, Value, PlantNoToRbhStandard...)
 	if len(errListFiltered) > 0 {
 		for i, err := range errListFiltered {
 			if err != nil {
@@ -351,4 +386,107 @@ func RbhStandard(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bo
 		}
 	}
 	return rbhStandard, errList
+}
+
+// ControlAndRbh Set Ctrl and Rbh values for plants at the same time
+func ControlAndRbh(Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhValue, PlantNo ...uint8) ([]bool, []error) {
+	var errList []error
+	var controlled []bool
+	if len(PlantNo) == 0 {
+		return nil, nil
+	} else {
+		for range PlantNo {
+			controlled = append(controlled, false)
+			errList = append(errList, nil)
+		}
+	}
+	// check if Server is connected
+	if available, err := serverAvailable(Server); !available {
+		for range PlantNo {
+			errList = append(errList, err)
+		}
+		return make([]bool, len(PlantNo)), errList
+	}
+	// check if plants have already the desired state
+	var err error
+	var CtrlState []PlantState
+	var RbhState []PlantState
+	if Values.SetCtrlValue {
+		CtrlState, err = getPlantCtrlOrRbhState(Server, "Ctrl", PlantNo)
+		if err != nil {
+			for range PlantNo {
+				errList = append(errList, err)
+				controlled = append(controlled, false)
+			}
+			return controlled, errList
+		}
+		if Values.CtrlValue > 0 {
+			setActionToStop(&CtrlState, false, Values.CtrlValue)
+		} else {
+			setActionToStart(&CtrlState)
+		}
+		for _, state := range CtrlState {
+			if state.Action {
+				Values.CtrlAction = append(Values.CtrlAction, true)
+			} else {
+				Values.CtrlAction = append(Values.CtrlAction, false)
+			}
+		}
+		if allFalse(Values.CtrlAction) {
+			Values.SetCtrlValue = false
+		}
+	}
+	if Values.SetRbhValue {
+		RbhState, err = getPlantCtrlOrRbhState(Server, "Rbh", PlantNo)
+		if err != nil {
+			for range PlantNo {
+				errList = append(errList, err)
+				controlled = append(controlled, false)
+			}
+			return controlled, errList
+		}
+		setActionRbh(&RbhState, Values.RbhValue)
+		for _, state := range RbhState {
+			if state.Action {
+				Values.RbhAction = append(Values.RbhAction, true)
+			} else {
+				Values.RbhAction = append(Values.RbhAction, false)
+			}
+		}
+		if allFalse(Values.RbhAction) {
+			Values.SetRbhValue = false
+		}
+	}
+	// Filter plants based on the evaluated Action Bit
+	var PlantNoToControl []uint8
+	for i := range PlantNo {
+		if !Values.CtrlAction[i] && !Values.RbhAction[i] {
+			LogInfo(PlantNo[i], "ControlAndRbh", "Ctrl & Rbh of Plant already controlled")
+			controlled[i] = true
+		} else {
+			// Process just plants, that are not already controlled
+			PlantNoToControl = append(PlantNoToControl, PlantNo[i])
+		}
+	}
+	// control plants
+	controlledFiltered, errListFiltered := controlProcedure(Server, UserId, Values, PlantNoToControl...)
+	if len(errListFiltered) > 0 {
+		for i, err := range errListFiltered {
+			if err != nil {
+				LogError(PlantNoToControl[i], "ControlAndRbh", err.Error())
+				for j, p := range PlantNo {
+					if PlantNoToControl[i] == p {
+						errList[j] = err
+					}
+				}
+			} else if controlledFiltered[i] {
+				for j, p := range PlantNo {
+					if PlantNoToControl[i] == p {
+						controlled[j] = true
+					}
+				}
+			}
+		}
+	}
+	return controlled, errList
 }

@@ -37,7 +37,7 @@ func LogError(plantNo uint8, action string, msg string) {
 	}).Error(msg)
 }
 
-func LogIfStateChangePermitted(state PlantState, PlantNo uint8, desiredState uint32) {
+func LogIfStateChangePermitted(state PlantState, PlantNo uint8, desiredState uint64) {
 	if state.CtrlState > 128 {
 		var MSG string
 		var action string
