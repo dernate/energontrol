@@ -603,3 +603,26 @@ func TestControlAndRbh2(t *testing.T) {
 		t.Log("Test passed")
 	}
 }
+
+func TestTurbines(t *testing.T) {
+	err := godotenv.Load()
+	if err != nil {
+		t.Fatal("Error loading .env file")
+	}
+	OPCIP := os.Getenv("IP")
+	OPCPort := os.Getenv("PORT")
+
+	Server := gopcxmlda.Server{
+		Addr:     OPCIP,
+		Port:     OPCPort,
+		LocaleID: "en-us",
+		Timeout:  10,
+	}
+	turbines, err := Turbines(Server)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	} else {
+		t.Log(turbines)
+		t.Log("Test passed")
+	}
+}

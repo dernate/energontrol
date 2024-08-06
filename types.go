@@ -28,3 +28,12 @@ type ControlAndRbhValue struct {
 	RbhValue     uint64
 	RbhAction    []bool
 }
+
+type TurbineInfo struct {
+	PlantNo []uint8
+	Ctrl    map[uint8]bool
+	Rbh     map[uint8]bool
+	Reset   map[uint8]bool
+	Para    map[uint8]bool
+	IceDet  map[uint8]bool
+}

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"github.com/dernate/gopcxmlda"
 	"math/rand"
+	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -639,4 +641,85 @@ func allFalse(b []bool) bool {
 		}
 	}
 	return true
+}
+
+func filterPlants(b gopcxmlda.T_Browse) []uint8 {
+	var plants []uint8
+	re := regexp.MustCompile(`^Loc/Wec/Plant(\d+)$`)
+	for _, item := range b.Body.BrowseResponse.Elements {
+		if matches := re.FindStringSubmatch(item.ItemName); matches != nil {
+			if num, err := strconv.Atoi(matches[1]); err == nil {
+				if num >= 0 && num <= 255 {
+					plants = append(plants, uint8(num))
+				}
+			}
+		}
+	}
+	return plants
+}
+
+func getPlantInfo(Server gopcxmlda.Server, T *TurbineInfo) error {
+	if T.Ctrl == nil {
+		T.Ctrl = make(map[uint8]bool)
+	}
+	if T.Para == nil {
+		T.Para = make(map[uint8]bool)
+	}
+	if T.Rbh == nil {
+		T.Rbh = make(map[uint8]bool)
+	}
+	if T.Reset == nil {
+		T.Reset = make(map[uint8]bool)
+	}
+	if T.IceDet == nil {
+		T.IceDet = make(map[uint8]bool)
+	}
+	var ClientRequestHandle string
+	for _, plant := range T.PlantNo {
+		optionsBranch := gopcxmlda.T_BrowseOptions{
+			BrowseFilter: "branch",
+		}
+		b, err := Server.Browse(fmt.Sprintf("Loc/Wec/Plant%d", plant), &ClientRequestHandle, "", optionsBranch)
+		if err != nil {
+			return err
+		}
+		for _, item := range b.Body.BrowseResponse.Elements {
+			if item.Name == "Ctrl" && item.HasChildren {
+				b2, err := Server.Browse(fmt.Sprintf("Loc/Wec/Plant%d/Ctrl", plant), &ClientRequestHandle, "", gopcxmlda.T_BrowseOptions{
+					ElementNameFilter: "Set*",
+				})
+				if err != nil {
+					return err
+				}
+				for _, item2 := range b2.Body.BrowseResponse.Elements {
+					if item2.Name == "SetCtrl" {
+						T.Ctrl[plant] = true
+					}
+					if item2.Name == "SetRbh" {
+						T.Rbh[plant] = true
+					}
+					if item2.Name == "SetIceDet" {
+						T.IceDet[plant] = true
+					}
+				}
+			}
+			if item.Name == "Reset" && item.HasChildren {
+				b2, err := Server.Browse(fmt.Sprintf("Loc/Wec/Plant%d/Reset", plant), &ClientRequestHandle, "", gopcxmlda.T_BrowseOptions{
+					ElementNameFilter: "SetReset",
+				})
+				if err != nil {
+					return err
+				}
+				for _, item2 := range b2.Body.BrowseResponse.Elements {
+					if item2.Name == "SetReset" {
+						T.Reset[plant] = true
+					}
+				}
+			}
+			if item.Name == "Para" && item.HasChildren {
+				T.Para[plant] = true
+			}
+		}
+	}
+	return nil
 }

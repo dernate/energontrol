@@ -11,9 +11,10 @@ The following Functions are implemented:
 - [ ] RbhAutoOff
 - [ ] RbhStandard
 - [ ] ControlAndRbh
-
-The following Functions are not yet implemented:
 - [ ] Turbines
+
+Roadmap:
+- [ ] No new features are planned at the moment. Feel free to open an issue if you have a feature request or create a pull request if you want to contribute.
 
 ### Basic Procedure
 Basic usage is as follows:
@@ -117,4 +118,7 @@ controlled, errList := ControlAndRbh(Server, UserId, Values, PlantNo...)
 ### Turbines(Server)
 Get a list of turbines and which controls are available for each turbine.
 
-Example: ...
+Example:
+```go
+turbines, err := Turbines(Server)
+```

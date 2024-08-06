@@ -490,3 +490,24 @@ func ControlAndRbh(Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhV
 	}
 	return controlled, errList
 }
+
+func Turbines(Server gopcxmlda.Server) (TurbineInfo, error) {
+	// check if Server is connected
+	if available, err := serverAvailable(Server); !available {
+		return TurbineInfo{}, err
+	}
+	// Browse for all Turbines
+	var ClientRequestHandle string
+	options := gopcxmlda.T_BrowseOptions{}
+	b, err := Server.Browse("Loc/Wec", &ClientRequestHandle, "", options)
+	if err != nil {
+		return TurbineInfo{}, err
+	}
+	var T TurbineInfo
+	T.PlantNo = filterPlants(b)
+	err = getPlantInfo(Server, &T)
+	if err != nil {
+		return T, err
+	}
+	return T, err
+}
