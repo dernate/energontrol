@@ -122,3 +122,6 @@ Example:
 ```go
 turbines, err := Turbines(Server)
 ```
+
+# Important:
+**Wind turbines are critical infrastructure!** It is important to be particularly careful when interacting with them and only carry out tests in suitable test environments. I assume no liability for any consequences of using this source code, **use at your own risk**!
