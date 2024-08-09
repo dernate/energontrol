@@ -1,6 +1,7 @@
 package energontrol
 
 import (
+	"errors"
 	"github.com/dernate/gopcxmlda"
 )
 
@@ -8,7 +9,8 @@ func Start(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 	var errList []error
 	var started []bool
 	if len(PlantNo) == 0 {
-		return nil, nil
+		errList = append(errList, errors.New("no PlantNo provided"))
+		return nil, errList
 	} else {
 		for range PlantNo {
 			started = append(started, false)
@@ -78,7 +80,8 @@ func Stop(Server gopcxmlda.Server, UserId uint64, FullStop bool, ForceExplicitCo
 	var errList []error
 	var stopped []bool
 	if len(PlantNo) == 0 {
-		return nil, nil
+		errList = append(errList, errors.New("no PlantNo provided"))
+		return nil, errList
 	} else {
 		for range PlantNo {
 			stopped = append(stopped, false)
@@ -154,7 +157,8 @@ func Reset(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 	var errList []error
 	var resetted []bool
 	if len(PlantNo) == 0 {
-		return nil, nil
+		errList = append(errList, errors.New("no PlantNo provided"))
+		return nil, errList
 	} else {
 		for range PlantNo {
 			resetted = append(resetted, false)
@@ -185,7 +189,8 @@ func RbhOn(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 	var errList []error
 	var rbhOn []bool
 	if len(PlantNo) == 0 {
-		return nil, nil
+		errList = append(errList, errors.New("no PlantNo provided"))
+		return nil, errList
 	} else {
 		for range PlantNo {
 			rbhOn = append(rbhOn, false)
@@ -254,7 +259,8 @@ func RbhAutoOff(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]boo
 	var errList []error
 	var rbhAutoOff []bool
 	if len(PlantNo) == 0 {
-		return nil, nil
+		errList = append(errList, errors.New("no PlantNo provided"))
+		return nil, errList
 	} else {
 		for range PlantNo {
 			rbhAutoOff = append(rbhAutoOff, false)
@@ -323,7 +329,8 @@ func RbhStandard(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bo
 	var errList []error
 	var rbhStandard []bool
 	if len(PlantNo) == 0 {
-		return nil, nil
+		errList = append(errList, errors.New("no PlantNo provided"))
+		return nil, errList
 	} else {
 		for range PlantNo {
 			rbhStandard = append(rbhStandard, false)
@@ -393,7 +400,8 @@ func ControlAndRbh(Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhV
 	var errList []error
 	var controlled []bool
 	if len(PlantNo) == 0 {
-		return nil, nil
+		errList = append(errList, errors.New("no PlantNo provided"))
+		return nil, errList
 	} else {
 		for range PlantNo {
 			controlled = append(controlled, false)
