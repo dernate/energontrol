@@ -30,6 +30,7 @@ type ControlAndRbhValue struct {
 }
 
 type TurbineInfo struct {
+	ParkNo  uint64
 	PlantNo []uint8
 	Ctrl    map[uint8]bool
 	Rbh     map[uint8]bool

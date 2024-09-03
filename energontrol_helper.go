@@ -675,6 +675,21 @@ func getPlantInfo(Server gopcxmlda.Server, T *TurbineInfo) error {
 		T.IceDet = make(map[uint8]bool)
 	}
 	var ClientRequestHandle string
+	var ClientItemHandles []string
+	_parkNo, err := Server.Read([]gopcxmlda.T_Item{
+		{
+			ItemName: "Loc/LocNo",
+		},
+	}, &ClientRequestHandle, &ClientItemHandles, "", map[string]interface{}{
+		"returnItemName": true,
+	})
+	if err != nil {
+		return err
+	}
+	if len(_parkNo.Body.ReadResponse.RItemList.Items) == 0 {
+		return fmt.Errorf("ParkNo not found")
+	}
+	T.ParkNo = _parkNo.Body.ReadResponse.RItemList.Items[0].Value.Value.(uint64)
 	for _, plant := range T.PlantNo {
 		optionsBranch := gopcxmlda.T_BrowseOptions{
 			BrowseFilter: "branch",
