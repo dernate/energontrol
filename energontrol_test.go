@@ -626,3 +626,33 @@ func TestTurbines(t *testing.T) {
 		t.Log("Test passed")
 	}
 }
+
+func TestParkNoMatch(t *testing.T) {
+	err := godotenv.Load()
+	if err != nil {
+		t.Fatal("Error loading .env file")
+	}
+	OPCIP := os.Getenv("IP")
+	OPCPort := os.Getenv("PORT")
+	ParkNoStr := os.Getenv("PARKNO")
+	ParkNo, err := strconv.ParseUint(ParkNoStr, 10, 64)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
+
+	Server := gopcxmlda.Server{
+		Addr:     OPCIP,
+		Port:     OPCPort,
+		LocaleID: "en-us",
+		Timeout:  10,
+	}
+	match, err := ParkNoMatch(Server, ParkNo, true)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
+	if match {
+		t.Log("Test passed, ParkNo match")
+	} else {
+		t.Error("Test failed, ParkNo does not match")
+	}
+}

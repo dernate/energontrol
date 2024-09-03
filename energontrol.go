@@ -519,3 +519,32 @@ func Turbines(Server gopcxmlda.Server) (TurbineInfo, error) {
 	}
 	return T, err
 }
+
+// ParkNoMatch: Read the Park Number from the Server and compare it with the provided ParkNo
+func ParkNoMatch(Server gopcxmlda.Server, ParkNo uint64, checkAvailable bool) (bool, error) {
+	if checkAvailable {
+		// check if Server is connected
+		if available, err := serverAvailable(Server); !available {
+			return false, err
+		}
+	}
+	// check if ParkNo is correct
+	var handle1 string
+	var handle2 []string
+	options := map[string]interface{}{
+		"returnItemName": true,
+	}
+	Item := []gopcxmlda.T_Item{
+		{
+			ItemName: "Loc/LocNo",
+		},
+	}
+	value, err := Server.Read(Item, &handle1, &handle2, "", options)
+	if err != nil {
+		return false, err
+	}
+	if value.Body.ReadResponse.RItemList.Items[0].Value.Value == ParkNo {
+		return true, nil
+	}
+	return false, nil
+}

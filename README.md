@@ -12,6 +12,7 @@ The following Functions are implemented:
 - [ ] RbhStandard
 - [ ] ControlAndRbh
 - [ ] Turbines
+- [ ] ParkNoMatch
 
 Roadmap:
 - [ ] No new features are planned at the moment. Feel free to open an issue if you have a feature request or create a pull request if you want to contribute.
@@ -121,6 +122,14 @@ Get a list of turbines and which controls are available for each turbine.
 Example:
 ```go
 turbines, err := Turbines(Server)
+```
+
+### ParkNoMatch(Server, ParkNo, checkAvailable)
+Read the Park Number from the Server and compare it with the provided ParkNo. If checkAvailable is true, the function also checks if the Server is running.
+
+Example:
+```go
+match, err := ParkNoMatch(Server, 1234, false)
 ```
 
 # Important:
