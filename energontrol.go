@@ -467,13 +467,21 @@ func ControlAndRbh(Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhV
 	}
 	// Filter plants based on the evaluated Action Bit
 	var PlantNoToControl []uint8
-	for i := range PlantNo {
-		if !Values.CtrlAction[i] && !Values.RbhAction[i] {
-			LogInfo(PlantNo[i], "ControlAndRbh", "Ctrl & Rbh of Plant already controlled")
+	if !Values.SetCtrlValue && !Values.SetRbhValue {
+		for i, p := range PlantNo {
+			LogInfo(p, "ControlAndRbh", "Ctrl & Rbh of Plant already controlled")
 			controlled[i] = true
-		} else {
-			// Process just plants, that are not already controlled
-			PlantNoToControl = append(PlantNoToControl, PlantNo[i])
+		}
+	} else {
+		for i, p := range PlantNo {
+			if Values.CtrlAction != nil && Values.CtrlAction[i] {
+				PlantNoToControl = append(PlantNoToControl, p)
+			} else if Values.RbhAction != nil && Values.RbhAction[i] {
+				PlantNoToControl = append(PlantNoToControl, p)
+			} else {
+				LogInfo(PlantNo[i], "ControlAndRbh", "Ctrl of Plant already controlled")
+				controlled[i] = true
+			}
 		}
 	}
 	// control plants
