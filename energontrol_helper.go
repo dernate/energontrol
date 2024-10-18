@@ -16,7 +16,7 @@ func serverAvailable(Server gopcxmlda.Server) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return status.Body.GetStatusResponse.GetStatusResult.ServerState == "running", nil
+	return status.Response.Result.ServerState == "running", nil
 }
 
 func getPlantCtrlOrRbhState(Server gopcxmlda.Server, CtrlOrRbh string, PlantNo []uint8) ([]PlantState, error) {
@@ -29,9 +29,9 @@ func getPlantCtrlOrRbhState(Server gopcxmlda.Server, CtrlOrRbh string, PlantNo [
 	options := map[string]interface{}{
 		"returnItemName": true,
 	}
-	var items []gopcxmlda.T_Item
+	var items []gopcxmlda.TItem
 	for _, plant := range PlantNo {
-		items = append(items, gopcxmlda.T_Item{
+		items = append(items, gopcxmlda.TItem{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/%s", plant, CtrlOrRbh),
 		})
 	}
@@ -40,7 +40,7 @@ func getPlantCtrlOrRbhState(Server gopcxmlda.Server, CtrlOrRbh string, PlantNo [
 		return nil, err
 	} else {
 		plantState := make([]PlantState, len(PlantNo))
-		for i, item := range value.Body.ReadResponse.RItemList.Items {
+		for i, item := range value.Response.ItemList.Items {
 			plantState[i].PlantNo = PlantNo[i]
 			plantState[i].CtrlState = item.Value.Value.(uint64)
 		}
@@ -314,9 +314,9 @@ func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForSt
 		return nil, fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
 	// read sessionState
-	var stateItems []gopcxmlda.T_Item
+	var stateItems []gopcxmlda.TItem
 	for _, plant := range PlantNo {
-		stateItems = append(stateItems, gopcxmlda.T_Item{
+		stateItems = append(stateItems, gopcxmlda.TItem{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/%s/SessionState", plant, CtrlOrReset),
 		})
 	}
@@ -325,7 +325,7 @@ func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForSt
 	options := map[string]interface{}{
 		"returnItemName": true,
 	}
-	var value gopcxmlda.T_Read
+	var value gopcxmlda.TRead
 	var err error
 	var retSessionState []uint16
 	for range WaitFor.Retries + 1 {
@@ -335,7 +335,7 @@ func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForSt
 		}
 		if WaitFor.Retries > 0 {
 			bOk := false
-			for _, item := range value.Body.ReadResponse.RItemList.Items {
+			for _, item := range value.Response.ItemList.Items {
 				if WaitFor.Desired != item.Value.Value.(uint16) {
 					bOk = false
 					break
@@ -351,7 +351,7 @@ func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForSt
 			}
 		}
 	}
-	for _, item := range value.Body.ReadResponse.RItemList.Items {
+	for _, item := range value.Response.ItemList.Items {
 		retSessionState = append(retSessionState, item.Value.Value.(uint16))
 	}
 	return retSessionState, nil
@@ -393,10 +393,10 @@ func requestSession(Server gopcxmlda.Server, SR SessionRequest, PlantNo uint8, C
 	if CtrlOrReset != "Ctrl" && CtrlOrReset != "Reset" {
 		return fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
-	items := []gopcxmlda.T_Item{
+	items := []gopcxmlda.TItem{
 		{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/%s/SessionRequest", PlantNo, CtrlOrReset),
-			Value: gopcxmlda.T_Value{
+			Value: gopcxmlda.TValue{
 				Value: []uint64{uint64(SR.SessionId), SR.UserId, uint64(SR.PrivateKey)},
 			},
 		},
@@ -425,7 +425,7 @@ func getPublicKey(Server gopcxmlda.Server, PlantNo uint8, CtrlOrReset string) (u
 	options := map[string]interface{}{
 		"returnItemName": true,
 	}
-	items := []gopcxmlda.T_Item{
+	items := []gopcxmlda.TItem{
 		{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/%s/SessionPubKey", PlantNo, CtrlOrReset),
 		},
@@ -433,10 +433,10 @@ func getPublicKey(Server gopcxmlda.Server, PlantNo uint8, CtrlOrReset string) (u
 	value, err := Server.Read(items, &handle1, &handle2, "", options)
 	if err != nil {
 		return 0, err
-	} else if value.Body.ReadResponse.RItemList.Items[0].Value.Value.(uint64) == 0 {
+	} else if value.Response.ItemList.Items[0].Value.Value.(uint64) == 0 {
 		return 0, fmt.Errorf("public key is 0")
 	} else {
-		return value.Body.ReadResponse.RItemList.Items[0].Value.Value.(uint64), nil
+		return value.Response.ItemList.Items[0].Value.Value.(uint64), nil
 	}
 }
 
@@ -444,10 +444,10 @@ func writeControlValue(Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint64,
 	if CtrlOrRbh != "Ctrl" && CtrlOrRbh != "Rbh" {
 		return fmt.Errorf("CtrlOrRbh must be either Ctrl or Rbh")
 	}
-	items := []gopcxmlda.T_Item{
+	items := []gopcxmlda.TItem{
 		{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/Set%s", PlantNo, CtrlOrRbh),
-			Value: gopcxmlda.T_Value{
+			Value: gopcxmlda.TValue{
 				Value: []uint64{CtrlValue, uint64(PrivateKey), PublicKey},
 			},
 		},
@@ -471,10 +471,10 @@ func submitValue(Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, Publ
 	if CtrlOrReset != "Ctrl" && CtrlOrReset != "Reset" {
 		return fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
-	items := []gopcxmlda.T_Item{
+	items := []gopcxmlda.TItem{
 		{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/%s/SessionSubmit", PlantNo, CtrlOrReset),
-			Value: gopcxmlda.T_Value{
+			Value: gopcxmlda.TValue{
 				Value: []uint64{uint64(PrivateKey), PublicKey},
 			},
 		},
@@ -495,10 +495,10 @@ func submitValue(Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, Publ
 }
 
 func writeResetValue(Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, PublicKey uint64) error {
-	items := []gopcxmlda.T_Item{
+	items := []gopcxmlda.TItem{
 		{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Reset/SetReset", PlantNo),
-			Value: gopcxmlda.T_Value{
+			Value: gopcxmlda.TValue{
 				Value: []uint64{uint64(PlantNo), uint64(PrivateKey), PublicKey},
 			},
 		},
@@ -643,10 +643,10 @@ func allFalse(b []bool) bool {
 	return true
 }
 
-func filterPlants(b gopcxmlda.T_Browse) []uint8 {
+func filterPlants(b gopcxmlda.TBrowse) []uint8 {
 	var plants []uint8
 	re := regexp.MustCompile(`^Loc/Wec/Plant(\d+)$`)
-	for _, item := range b.Body.BrowseResponse.Elements {
+	for _, item := range b.Response.Elements {
 		if matches := re.FindStringSubmatch(item.ItemName); matches != nil {
 			if num, err := strconv.Atoi(matches[1]); err == nil {
 				if num >= 0 && num <= 255 {
@@ -676,7 +676,7 @@ func getPlantInfo(Server gopcxmlda.Server, T *TurbineInfo) error {
 	}
 	var ClientRequestHandle string
 	var ClientItemHandles []string
-	_parkNo, err := Server.Read([]gopcxmlda.T_Item{
+	_parkNo, err := Server.Read([]gopcxmlda.TItem{
 		{
 			ItemName: "Loc/LocNo",
 		},
@@ -686,27 +686,27 @@ func getPlantInfo(Server gopcxmlda.Server, T *TurbineInfo) error {
 	if err != nil {
 		return err
 	}
-	if len(_parkNo.Body.ReadResponse.RItemList.Items) == 0 {
+	if len(_parkNo.Response.ItemList.Items) == 0 {
 		return fmt.Errorf("ParkNo not found")
 	}
-	T.ParkNo = _parkNo.Body.ReadResponse.RItemList.Items[0].Value.Value.(uint64)
+	T.ParkNo = _parkNo.Response.ItemList.Items[0].Value.Value.(uint64)
 	for _, plant := range T.PlantNo {
-		optionsBranch := gopcxmlda.T_BrowseOptions{
+		optionsBranch := gopcxmlda.TBrowseOptions{
 			BrowseFilter: "branch",
 		}
 		b, err := Server.Browse(fmt.Sprintf("Loc/Wec/Plant%d", plant), &ClientRequestHandle, "", optionsBranch)
 		if err != nil {
 			return err
 		}
-		for _, item := range b.Body.BrowseResponse.Elements {
+		for _, item := range b.Response.Elements {
 			if item.Name == "Ctrl" && item.HasChildren {
-				b2, err := Server.Browse(fmt.Sprintf("Loc/Wec/Plant%d/Ctrl", plant), &ClientRequestHandle, "", gopcxmlda.T_BrowseOptions{
+				b2, err := Server.Browse(fmt.Sprintf("Loc/Wec/Plant%d/Ctrl", plant), &ClientRequestHandle, "", gopcxmlda.TBrowseOptions{
 					ElementNameFilter: "Set*",
 				})
 				if err != nil {
 					return err
 				}
-				for _, item2 := range b2.Body.BrowseResponse.Elements {
+				for _, item2 := range b2.Response.Elements {
 					if item2.Name == "SetCtrl" {
 						T.Ctrl[plant] = true
 					}
@@ -719,13 +719,13 @@ func getPlantInfo(Server gopcxmlda.Server, T *TurbineInfo) error {
 				}
 			}
 			if item.Name == "Reset" && item.HasChildren {
-				b2, err := Server.Browse(fmt.Sprintf("Loc/Wec/Plant%d/Reset", plant), &ClientRequestHandle, "", gopcxmlda.T_BrowseOptions{
+				b2, err := Server.Browse(fmt.Sprintf("Loc/Wec/Plant%d/Reset", plant), &ClientRequestHandle, "", gopcxmlda.TBrowseOptions{
 					ElementNameFilter: "SetReset",
 				})
 				if err != nil {
 					return err
 				}
-				for _, item2 := range b2.Body.BrowseResponse.Elements {
+				for _, item2 := range b2.Response.Elements {
 					if item2.Name == "SetReset" {
 						T.Reset[plant] = true
 					}

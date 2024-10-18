@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/dernate/gopcxmlda"
 	"github.com/joho/godotenv"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -16,12 +17,14 @@ func TestAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error loading .env file")
 	}
-	OPCIP := os.Getenv("IP")
-	OPCPort := os.Getenv("PORT")
+	OpcUrl := os.Getenv("OPC_URL")
+	_url, err := url.Parse(OpcUrl)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
 
 	Server := gopcxmlda.Server{
-		Addr:     OPCIP,
-		Port:     OPCPort,
+		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
@@ -79,12 +82,14 @@ func TestStart(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error loading .env file")
 	}
-	OPCIP := os.Getenv("IP")
-	OPCPort := os.Getenv("PORT")
+	OpcUrl := os.Getenv("OPC_URL")
+	_url, err := url.Parse(OpcUrl)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
 
 	Server := gopcxmlda.Server{
-		Addr:     OPCIP,
-		Port:     OPCPort,
+		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
@@ -115,9 +120,9 @@ func TestStart(t *testing.T) {
 
 	// check if plant started
 	time.Sleep(10 * time.Second)
-	var item []gopcxmlda.T_Item
+	var item []gopcxmlda.TItem
 	for _, p := range PlantNo {
-		item = append(item, gopcxmlda.T_Item{
+		item = append(item, gopcxmlda.TItem{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/Ctrl", p),
 		})
 	}
@@ -133,7 +138,7 @@ func TestStart(t *testing.T) {
 		t.Fatal(err)
 	} else {
 		var bErr bool
-		for _, s := range CtrlState.Body.ReadResponse.RItemList.Items {
+		for _, s := range CtrlState.Response.ItemList.Items {
 			if s.Value.Value.(uint64) != 0 {
 				t.Errorf("Error: Plant %d did not start", s.Value.Value)
 				bErr = true
@@ -150,12 +155,14 @@ func TestStop(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error loading .env file")
 	}
-	OPCIP := os.Getenv("IP")
-	OPCPort := os.Getenv("PORT")
+	OpcUrl := os.Getenv("OPC_URL")
+	_url, err := url.Parse(OpcUrl)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
 
 	Server := gopcxmlda.Server{
-		Addr:     OPCIP,
-		Port:     OPCPort,
+		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
@@ -195,9 +202,9 @@ func TestStop(t *testing.T) {
 
 	// check if plant stopped
 	time.Sleep(10 * time.Second)
-	var items []gopcxmlda.T_Item
+	var items []gopcxmlda.TItem
 	for _, p := range PlantNo {
-		items = append(items, gopcxmlda.T_Item{
+		items = append(items, gopcxmlda.TItem{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/Ctrl", p),
 		})
 	}
@@ -213,11 +220,11 @@ func TestStop(t *testing.T) {
 		t.Fatal(err)
 	} else {
 		var bErr bool
-		if CtrlState.Body.ReadResponse.RItemList.Items[0].Value.Value.(uint64) != 1 {
+		if CtrlState.Response.ItemList.Items[0].Value.Value.(uint64) != 1 {
 			t.Errorf("Error: Plant %d did not stop", PlantNo[0])
 			bErr = true
 		}
-		if CtrlState.Body.ReadResponse.RItemList.Items[1].Value.Value.(uint64) != 2 {
+		if CtrlState.Response.ItemList.Items[1].Value.Value.(uint64) != 2 {
 			t.Errorf("Error: Plant %d did not stop", PlantNo[1])
 			bErr = true
 		}
@@ -232,12 +239,14 @@ func TestSessionState(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error loading .env file")
 	}
-	OPCIP := os.Getenv("IP")
-	OPCPort := os.Getenv("PORT")
+	OpcUrl := os.Getenv("OPC_URL")
+	_url, err := url.Parse(OpcUrl)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
 
 	Server := gopcxmlda.Server{
-		Addr:     OPCIP,
-		Port:     OPCPort,
+		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
@@ -277,12 +286,14 @@ func TestReset(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error loading .env file")
 	}
-	OPCIP := os.Getenv("IP")
-	OPCPort := os.Getenv("PORT")
+	OpcUrl := os.Getenv("OPC_URL")
+	_url, err := url.Parse(OpcUrl)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
 
 	Server := gopcxmlda.Server{
-		Addr:     OPCIP,
-		Port:     OPCPort,
+		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
@@ -390,12 +401,14 @@ func TestRbhOn(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error loading .env file")
 	}
-	OPCIP := os.Getenv("IP")
-	OPCPort := os.Getenv("PORT")
+	OpcUrl := os.Getenv("OPC_URL")
+	_url, err := url.Parse(OpcUrl)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
 
 	Server := gopcxmlda.Server{
-		Addr:     OPCIP,
-		Port:     OPCPort,
+		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
@@ -435,12 +448,14 @@ func TestRbhAutoOff(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error loading .env file")
 	}
-	OPCIP := os.Getenv("IP")
-	OPCPort := os.Getenv("PORT")
+	OpcUrl := os.Getenv("OPC_URL")
+	_url, err := url.Parse(OpcUrl)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
 
 	Server := gopcxmlda.Server{
-		Addr:     OPCIP,
-		Port:     OPCPort,
+		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
@@ -480,12 +495,14 @@ func TestRbhStandard(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error loading .env file")
 	}
-	OPCIP := os.Getenv("IP")
-	OPCPort := os.Getenv("PORT")
+	OpcUrl := os.Getenv("OPC_URL")
+	_url, err := url.Parse(OpcUrl)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
 
 	Server := gopcxmlda.Server{
-		Addr:     OPCIP,
-		Port:     OPCPort,
+		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
@@ -525,12 +542,14 @@ func TestControlAndRbh1(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error loading .env file")
 	}
-	OPCIP := os.Getenv("IP")
-	OPCPort := os.Getenv("PORT")
+	OpcUrl := os.Getenv("OPC_URL")
+	_url, err := url.Parse(OpcUrl)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
 
 	Server := gopcxmlda.Server{
-		Addr:     OPCIP,
-		Port:     OPCPort,
+		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
@@ -567,12 +586,14 @@ func TestControlAndRbh2(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error loading .env file")
 	}
-	OPCIP := os.Getenv("IP")
-	OPCPort := os.Getenv("PORT")
+	OpcUrl := os.Getenv("OPC_URL")
+	_url, err := url.Parse(OpcUrl)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
 
 	Server := gopcxmlda.Server{
-		Addr:     OPCIP,
-		Port:     OPCPort,
+		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
@@ -609,12 +630,14 @@ func TestTurbines(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error loading .env file")
 	}
-	OPCIP := os.Getenv("IP")
-	OPCPort := os.Getenv("PORT")
+	OpcUrl := os.Getenv("OPC_URL")
+	_url, err := url.Parse(OpcUrl)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
 
 	Server := gopcxmlda.Server{
-		Addr:     OPCIP,
-		Port:     OPCPort,
+		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
@@ -632,17 +655,20 @@ func TestParkNoMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal("Error loading .env file")
 	}
-	OPCIP := os.Getenv("IP")
-	OPCPort := os.Getenv("PORT")
 	ParkNoStr := os.Getenv("PARKNO")
 	ParkNo, err := strconv.ParseUint(ParkNoStr, 10, 64)
 	if err != nil {
 		t.Errorf("Error: %s", err)
 	}
 
+	OpcUrl := os.Getenv("OPC_URL")
+	_url, err := url.Parse(OpcUrl)
+	if err != nil {
+		t.Errorf("Error: %s", err)
+	}
+
 	Server := gopcxmlda.Server{
-		Addr:     OPCIP,
-		Port:     OPCPort,
+		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
