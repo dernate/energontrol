@@ -1,6 +1,7 @@
 package energontrol
 
 import (
+	"context"
 	"fmt"
 	"github.com/dernate/gopcxmlda"
 	"math/rand"
@@ -9,17 +10,17 @@ import (
 	"time"
 )
 
-func serverAvailable(Server gopcxmlda.Server) (bool, error) {
+func serverAvailable(ctx context.Context, Server gopcxmlda.Server) (bool, error) {
 	// check if Server is connected
 	var handle string
-	status, err := Server.GetStatus(&handle, "")
+	status, err := Server.GetStatus(ctx, &handle, "")
 	if err != nil {
 		return false, err
 	}
 	return status.Response.Result.ServerState == "running", nil
 }
 
-func getPlantCtrlOrRbhState(Server gopcxmlda.Server, CtrlOrRbh string, PlantNo []uint8) ([]PlantState, error) {
+func getPlantCtrlOrRbhState(ctx context.Context, Server gopcxmlda.Server, CtrlOrRbh string, PlantNo []uint8) ([]PlantState, error) {
 	if CtrlOrRbh != "Ctrl" && CtrlOrRbh != "Rbh" {
 		return nil, fmt.Errorf("CtrlOrRbh must be either Ctrl or Rbh")
 	}
@@ -35,7 +36,7 @@ func getPlantCtrlOrRbhState(Server gopcxmlda.Server, CtrlOrRbh string, PlantNo [
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/%s", plant, CtrlOrRbh),
 		})
 	}
-	value, err := Server.Read(items, &handle1, &handle2, "", options)
+	value, err := Server.Read(ctx, items, &handle1, &handle2, "", options)
 	if err != nil {
 		return nil, err
 	} else {
@@ -118,7 +119,7 @@ func rbhStatusRight(actual uint64, desired uint64) bool {
 	}
 }
 
-func controlProcedure(Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhValue, PlantNo ...uint8) ([]bool, []error) {
+func controlProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhValue, PlantNo ...uint8) ([]bool, []error) {
 	if len(PlantNo) == 0 {
 		return nil, nil
 	}
@@ -155,7 +156,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, Values ControlAndR
 		Sleep:   100 * time.Millisecond,
 		Retries: 10,
 	}
-	SesState, err := sessionState(Server, SessionType, WaitFor, PlantNo...)
+	SesState, err := sessionState(ctx, Server, SessionType, WaitFor, PlantNo...)
 	if err != nil {
 		for i := range errList {
 			errList[i] = err
@@ -184,7 +185,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, Values ControlAndR
 		}
 		// do session request
 		SessionRequestValues[i] = generateSessionRequest(UserId)
-		err = requestSession(Server, SessionRequestValues[i], plant, SessionType)
+		err = requestSession(ctx, Server, SessionRequestValues[i], plant, SessionType)
 		if err != nil {
 			errList[i] = err
 			success[i] = false
@@ -192,7 +193,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, Values ControlAndR
 	}
 	// Get new Session State
 	WaitFor.Desired = 1
-	SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo...)
+	SesState, err = sessionState(ctx, Server, SessionType, WaitFor, PlantNo...)
 	if err != nil {
 		for i := range errList {
 			errList[i] = err
@@ -220,7 +221,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, Values ControlAndR
 			continue
 		}
 		var PublicKey uint64
-		PublicKey, err = getPublicKey(Server, plant, SessionType)
+		PublicKey, err = getPublicKey(ctx, Server, plant, SessionType)
 		if err != nil {
 			PublicKeys[i] = 0
 			errList[i] = err
@@ -229,7 +230,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, Values ControlAndR
 		}
 		PublicKeys[i] = PublicKey
 		if Values.SetCtrlValue && Values.CtrlAction[i] {
-			err = writeControlValue(Server, plant, Values.CtrlValue, SessionRequestValues[i].PrivateKey, PublicKey, "Ctrl")
+			err = writeControlValue(ctx, Server, plant, Values.CtrlValue, SessionRequestValues[i].PrivateKey, PublicKey, "Ctrl")
 			if err != nil {
 				errList[i] = err
 				success[i] = false
@@ -237,7 +238,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, Values ControlAndR
 			}
 		}
 		if Values.SetRbhValue && Values.RbhAction[i] {
-			err = writeControlValue(Server, plant, Values.RbhValue, SessionRequestValues[i].PrivateKey, PublicKey, "Rbh")
+			err = writeControlValue(ctx, Server, plant, Values.RbhValue, SessionRequestValues[i].PrivateKey, PublicKey, "Rbh")
 			if err != nil {
 				errList[i] = err
 				success[i] = false
@@ -248,7 +249,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, Values ControlAndR
 
 	// Get new Session State
 	WaitFor.Desired = 2
-	SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo...)
+	SesState, err = sessionState(ctx, Server, SessionType, WaitFor, PlantNo...)
 	if err != nil {
 		for i := range errList {
 			errList[i] = err
@@ -271,7 +272,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, Values ControlAndR
 			success[i] = false
 			continue
 		}
-		err = submitValue(Server, plant, SessionRequestValues[i].PrivateKey, PublicKeys[i], SessionType)
+		err = submitValue(ctx, Server, plant, SessionRequestValues[i].PrivateKey, PublicKeys[i], SessionType)
 		if err != nil {
 			errList[i] = err
 			success[i] = false
@@ -280,7 +281,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, Values ControlAndR
 	}
 	// Get new Session State
 	WaitFor.Desired = 4
-	SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo...)
+	SesState, err = sessionState(ctx, Server, SessionType, WaitFor, PlantNo...)
 	if err != nil {
 		for i := range errList {
 			errList[i] = err
@@ -309,7 +310,7 @@ func controlProcedure(Server gopcxmlda.Server, UserId uint64, Values ControlAndR
 }
 
 // Get the session state of a plant
-func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForState, PlantNo ...uint8) ([]uint16, error) {
+func sessionState(ctx context.Context, Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForState, PlantNo ...uint8) ([]uint16, error) {
 	if CtrlOrReset != "Ctrl" && CtrlOrReset != "Reset" {
 		return nil, fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
@@ -329,7 +330,7 @@ func sessionState(Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForSt
 	var err error
 	var retSessionState []uint16
 	for range WaitFor.Retries + 1 {
-		value, err = Server.Read(stateItems, &handle1, &handle2, "", options)
+		value, err = Server.Read(ctx, stateItems, &handle1, &handle2, "", options)
 		if err != nil {
 			return nil, err
 		}
@@ -389,7 +390,7 @@ func generateSessionRequest(UserId uint64) SessionRequest {
 }
 
 // requestSession Request a session
-func requestSession(Server gopcxmlda.Server, SR SessionRequest, PlantNo uint8, CtrlOrReset string) error {
+func requestSession(ctx context.Context, Server gopcxmlda.Server, SR SessionRequest, PlantNo uint8, CtrlOrReset string) error {
 	if CtrlOrReset != "Ctrl" && CtrlOrReset != "Reset" {
 		return fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
@@ -408,7 +409,7 @@ func requestSession(Server gopcxmlda.Server, SR SessionRequest, PlantNo uint8, C
 		"ReturnItemName":  true,
 		"ReturnItemPath":  true,
 	}
-	_, err := Server.Write(items, &ClientRequestHandle, &ClientItemHandles, "", options)
+	_, err := Server.Write(ctx, items, &ClientRequestHandle, &ClientItemHandles, "", options)
 	if err != nil {
 		return err
 	} else {
@@ -416,7 +417,7 @@ func requestSession(Server gopcxmlda.Server, SR SessionRequest, PlantNo uint8, C
 	}
 }
 
-func getPublicKey(Server gopcxmlda.Server, PlantNo uint8, CtrlOrReset string) (uint64, error) {
+func getPublicKey(ctx context.Context, Server gopcxmlda.Server, PlantNo uint8, CtrlOrReset string) (uint64, error) {
 	if CtrlOrReset != "Ctrl" && CtrlOrReset != "Reset" {
 		return 0, fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
@@ -430,7 +431,7 @@ func getPublicKey(Server gopcxmlda.Server, PlantNo uint8, CtrlOrReset string) (u
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/%s/SessionPubKey", PlantNo, CtrlOrReset),
 		},
 	}
-	value, err := Server.Read(items, &handle1, &handle2, "", options)
+	value, err := Server.Read(ctx, items, &handle1, &handle2, "", options)
 	if err != nil {
 		return 0, err
 	} else if value.Response.ItemList.Items[0].Value.Value.(uint64) == 0 {
@@ -440,7 +441,7 @@ func getPublicKey(Server gopcxmlda.Server, PlantNo uint8, CtrlOrReset string) (u
 	}
 }
 
-func writeControlValue(Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint64, PrivateKey uint16, PublicKey uint64, CtrlOrRbh string) error {
+func writeControlValue(ctx context.Context, Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint64, PrivateKey uint16, PublicKey uint64, CtrlOrRbh string) error {
 	if CtrlOrRbh != "Ctrl" && CtrlOrRbh != "Rbh" {
 		return fmt.Errorf("CtrlOrRbh must be either Ctrl or Rbh")
 	}
@@ -459,7 +460,7 @@ func writeControlValue(Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint64,
 		"ReturnItemName":  true,
 		"ReturnItemPath":  true,
 	}
-	_, err := Server.Write(items, &ClientRequestHandle, &ClientItemHandles, "", options)
+	_, err := Server.Write(ctx, items, &ClientRequestHandle, &ClientItemHandles, "", options)
 	if err != nil {
 		return err
 	} else {
@@ -467,7 +468,7 @@ func writeControlValue(Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint64,
 	}
 }
 
-func submitValue(Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, PublicKey uint64, CtrlOrReset string) error {
+func submitValue(ctx context.Context, Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, PublicKey uint64, CtrlOrReset string) error {
 	if CtrlOrReset != "Ctrl" && CtrlOrReset != "Reset" {
 		return fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
@@ -486,7 +487,7 @@ func submitValue(Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, Publ
 		"ReturnItemName":  true,
 		"ReturnItemPath":  true,
 	}
-	_, err := Server.Write(items, &ClientRequestHandle, &ClientItemHandles, "", options)
+	_, err := Server.Write(ctx, items, &ClientRequestHandle, &ClientItemHandles, "", options)
 	if err != nil {
 		return err
 	} else {
@@ -494,7 +495,7 @@ func submitValue(Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, Publ
 	}
 }
 
-func writeResetValue(Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, PublicKey uint64) error {
+func writeResetValue(ctx context.Context, Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, PublicKey uint64) error {
 	items := []gopcxmlda.TItem{
 		{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Reset/SetReset", PlantNo),
@@ -510,7 +511,7 @@ func writeResetValue(Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, 
 		"ReturnItemName":  true,
 		"ReturnItemPath":  true,
 	}
-	_, err := Server.Write(items, &ClientRequestHandle, &ClientItemHandles, "", options)
+	_, err := Server.Write(ctx, items, &ClientRequestHandle, &ClientItemHandles, "", options)
 	if err != nil {
 		return err
 	} else {
@@ -518,7 +519,7 @@ func writeResetValue(Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, 
 	}
 }
 
-func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+func resetProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
 	var success []bool
 	var errList []error
 	SessionType := "Reset"
@@ -527,7 +528,7 @@ func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([
 		return nil, nil
 	}
 	// Get session state
-	SesState, err := sessionState(Server, SessionType, WaitForState{}, PlantNo...)
+	SesState, err := sessionState(ctx, Server, SessionType, WaitForState{}, PlantNo...)
 	if err != nil {
 		for range PlantNo {
 			errList = append(errList, err)
@@ -544,7 +545,7 @@ func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([
 		}
 		// do session request
 		SessionRequestValues := generateSessionRequest(UserId)
-		err := requestSession(Server, SessionRequestValues, PlantNo[i], SessionType)
+		err := requestSession(ctx, Server, SessionRequestValues, PlantNo[i], SessionType)
 		if err != nil {
 			errList = append(errList, err)
 			success = append(success, false)
@@ -557,7 +558,7 @@ func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([
 			Retries: 10,
 		}
 
-		SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo[i])
+		SesState, err = sessionState(ctx, Server, SessionType, WaitFor, PlantNo[i])
 		if err != nil {
 			errList = append(errList, err)
 			success = append(success, false)
@@ -570,13 +571,13 @@ func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([
 			success = append(success, false)
 			continue
 		}
-		PublicKey, err := getPublicKey(Server, PlantNo[i], SessionType)
+		PublicKey, err := getPublicKey(ctx, Server, PlantNo[i], SessionType)
 		if err != nil {
 			errList = append(errList, err)
 			success = append(success, false)
 			continue
 		}
-		err = writeResetValue(Server, PlantNo[i], SessionRequestValues.PrivateKey, PublicKey)
+		err = writeResetValue(ctx, Server, PlantNo[i], SessionRequestValues.PrivateKey, PublicKey)
 		if err != nil {
 			errList = append(errList, err)
 			success = append(success, false)
@@ -588,7 +589,7 @@ func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([
 			Sleep:   100 * time.Millisecond,
 			Retries: 10,
 		}
-		SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo[i])
+		SesState, err = sessionState(ctx, Server, SessionType, WaitFor, PlantNo[i])
 		if err != nil {
 			errList = append(errList, err)
 			success = append(success, false)
@@ -601,7 +602,7 @@ func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([
 			success = append(success, false)
 			continue
 		}
-		err = submitValue(Server, PlantNo[i], SessionRequestValues.PrivateKey, PublicKey, SessionType)
+		err = submitValue(ctx, Server, PlantNo[i], SessionRequestValues.PrivateKey, PublicKey, SessionType)
 		if err != nil {
 			errList = append(errList, err)
 			success = append(success, false)
@@ -613,7 +614,7 @@ func resetProcedure(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([
 			Sleep:   100 * time.Millisecond,
 			Retries: 10,
 		}
-		SesState, err = sessionState(Server, SessionType, WaitFor, PlantNo[i])
+		SesState, err = sessionState(ctx, Server, SessionType, WaitFor, PlantNo[i])
 		if err != nil {
 			errList = append(errList, err)
 			success = append(success, false)
@@ -658,7 +659,7 @@ func filterPlants(b gopcxmlda.TBrowse) []uint8 {
 	return plants
 }
 
-func getPlantInfo(Server gopcxmlda.Server, T *TurbineInfo) error {
+func getPlantInfo(ctx context.Context, Server gopcxmlda.Server, T *TurbineInfo) error {
 	if T.Ctrl == nil {
 		T.Ctrl = make(map[uint8]bool)
 	}
@@ -676,7 +677,7 @@ func getPlantInfo(Server gopcxmlda.Server, T *TurbineInfo) error {
 	}
 	var ClientRequestHandle string
 	var ClientItemHandles []string
-	_parkNo, err := Server.Read([]gopcxmlda.TItem{
+	_parkNo, err := Server.Read(ctx, []gopcxmlda.TItem{
 		{
 			ItemName: "Loc/LocNo",
 		},
@@ -694,13 +695,13 @@ func getPlantInfo(Server gopcxmlda.Server, T *TurbineInfo) error {
 		optionsBranch := gopcxmlda.TBrowseOptions{
 			BrowseFilter: "branch",
 		}
-		b, err := Server.Browse(fmt.Sprintf("Loc/Wec/Plant%d", plant), &ClientRequestHandle, "", optionsBranch)
+		b, err := Server.Browse(ctx, fmt.Sprintf("Loc/Wec/Plant%d", plant), &ClientRequestHandle, "", optionsBranch)
 		if err != nil {
 			return err
 		}
 		for _, item := range b.Response.Elements {
 			if item.Name == "Ctrl" && item.HasChildren {
-				b2, err := Server.Browse(fmt.Sprintf("Loc/Wec/Plant%d/Ctrl", plant), &ClientRequestHandle, "", gopcxmlda.TBrowseOptions{
+				b2, err := Server.Browse(ctx, fmt.Sprintf("Loc/Wec/Plant%d/Ctrl", plant), &ClientRequestHandle, "", gopcxmlda.TBrowseOptions{
 					ElementNameFilter: "Set*",
 				})
 				if err != nil {
@@ -719,7 +720,7 @@ func getPlantInfo(Server gopcxmlda.Server, T *TurbineInfo) error {
 				}
 			}
 			if item.Name == "Reset" && item.HasChildren {
-				b2, err := Server.Browse(fmt.Sprintf("Loc/Wec/Plant%d/Reset", plant), &ClientRequestHandle, "", gopcxmlda.TBrowseOptions{
+				b2, err := Server.Browse(ctx, fmt.Sprintf("Loc/Wec/Plant%d/Reset", plant), &ClientRequestHandle, "", gopcxmlda.TBrowseOptions{
 					ElementNameFilter: "SetReset",
 				})
 				if err != nil {

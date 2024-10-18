@@ -27,26 +27,26 @@ import (
 )
 
 func main() {
+	_url, _ := url.Parse("http://your-opc-server:port/DA")
 	s := Server{
-		"http://your.opc-xml-da.server", 
-		8080, 
+	    _url,
 		"en-US", 
 		10,
 	}
 }
 ```
 
-### Start(Server, UserId, PlantNo...)
+### Start(Context, Server, UserId, PlantNo...)
 Start one or more turbines.
 
 Example:
 ```go
 UserId := 1234
 PlantNo := []uint8{2, 4}
-started, errList := Start(Server, UserId, PlantNo...)
+started, errList := Start(context.Background(), Server, UserId, PlantNo...)
 ```
 
-### Stop(Server, UserId, FullStop, ForceExplicitCommand, PlantNo...)
+### Stop(Context, Server, UserId, FullStop, ForceExplicitCommand, PlantNo...)
 Stop one or more turbines. FullStop can be false for 60° stop or true for 90° Stop.
 If ForceExplicitCommand is false, then any stop status that is already present is accepted. 
 (For example: Requested status Stop60, but the plant is already at Stop90, then it is not stopped at Stop60, but Stop90 is accepted)
@@ -56,50 +56,50 @@ Example:
 ```go
 UserId := 1234
 PlantNo := []uint8{2, 4}
-stopped, errList := Stop(Server, UserId, true, true, PlantNo...)
+stopped, errList := Stop(context.Background(), Server, UserId, true, true, PlantNo...)
 ```
 
-### Reset(Server, UserId, PlantNo..)
+### Reset(Context, Server, UserId, PlantNo..)
 Reset one or more turbines.
 
 Example:
 ```go
 UserId := 1234
 PlantNo := []uint8{2, 4}
-resetted, errList := Reset(Server, UserId, PlantNo...)
+resetted, errList := Reset(context.Background(), Server, UserId, PlantNo...)
 ```
 
-### RbhOn(Server, UserId, PlantNo...)
+### RbhOn(Context, Server, UserId, PlantNo...)
 Set the Rotor Blade Heating to "Manual On".
 
 Example:
 ```go
 UserId := 1234
 PlantNo := []uint8{2, 4}
-rbhOn, errList := RbhOn(Server, UserId, PlantNo...)
+rbhOn, errList := RbhOn(context.Background(), Server, UserId, PlantNo...)
 ```
 
-### RbhAutoOff(Server, UserId, PlantNo...)
+### RbhAutoOff(Context, Server, UserId, PlantNo...)
 Set the Rotor Blade Heating to "Auto Off" (Supress Automatic -> Off).
 
 Example:
 ```go
 UserId := 1234
 PlantNo := []uint8{2, 4}
-rbhAutoOff, errList := RbhAutoOff(Server, UserId, PlantNo...)
+rbhAutoOff, errList := RbhAutoOff(context.Background(), Server, UserId, PlantNo...)
 ```
 
-### RbhStandard(Server, UserId, PlantNo...)
+### RbhStandard(Context, Server, UserId, PlantNo...)
 Set the Rotor Blade Heating to "Standard". If automatic heating is allowed, the automatic takes control.
 
 Example:
 ```go
 UserId := 1234
 PlantNo := []uint8{2, 4}
-rbhStandard, errList := RbhStandard(Server, UserId, PlantNo...)
+rbhStandard, errList := RbhStandard(context.Background(), Server, UserId, PlantNo...)
 ```
 
-### ControlAndRbh(Server, UserId, Values, PlantNo...)
+### ControlAndRbh(Context, Server, UserId, Values, PlantNo...)
 Set Ctrl and Rbh value for one plant at once. The CtrlValue and RbhValue are the numbers, which will be set in the OPC.
 See constants.go for the possible values.
 
@@ -113,23 +113,23 @@ Values := ControlAndRbhValue{
 		RbhValue:     2,
 	}
 PlantNo := []uint8{2, 4}
-controlled, errList := ControlAndRbh(Server, UserId, Values, PlantNo...)
+controlled, errList := ControlAndRbh(context.Background(), Server, UserId, Values, PlantNo...)
 ```
 
-### Turbines(Server)
+### Turbines(Context, Server)
 Get a list of turbines and which controls are available for each turbine.
 
 Example:
 ```go
-turbines, err := Turbines(Server)
+turbines, err := Turbines(context.Background(), Server)
 ```
 
-### ParkNoMatch(Server, ParkNo, checkAvailable)
+### ParkNoMatch(Context, Server, ParkNo, checkAvailable)
 Read the Park Number from the Server and compare it with the provided ParkNo. If checkAvailable is true, the function also checks if the Server is running.
 
 Example:
 ```go
-match, err := ParkNoMatch(Server, 1234, false)
+match, err := ParkNoMatch(context.Background(), Server, 1234, false)
 ```
 
 # Important:

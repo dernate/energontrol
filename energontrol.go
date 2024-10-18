@@ -1,11 +1,12 @@
 package energontrol
 
 import (
+	"context"
 	"errors"
 	"github.com/dernate/gopcxmlda"
 )
 
-func Start(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+func Start(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var started []bool
 	if len(PlantNo) == 0 {
@@ -18,14 +19,14 @@ func Start(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 		}
 	}
 	// check if Server is connected
-	if available, err := serverAvailable(Server); !available {
+	if available, err := serverAvailable(ctx, Server); !available {
 		for range PlantNo {
 			errList = append(errList, err)
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
-	plantState, err := getPlantCtrlOrRbhState(Server, "Ctrl", PlantNo)
+	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Ctrl", PlantNo)
 	if err != nil {
 		for range PlantNo {
 			errList = append(errList, err)
@@ -53,7 +54,7 @@ func Start(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 	for range PlantNoToStart {
 		Value.CtrlAction = append(Value.CtrlAction, true)
 	}
-	startedFiltered, errListFiltered := controlProcedure(Server, UserId, Value, PlantNoToStart...)
+	startedFiltered, errListFiltered := controlProcedure(ctx, Server, UserId, Value, PlantNoToStart...)
 	if len(errListFiltered) > 0 {
 		for i, err := range errListFiltered {
 			if err != nil {
@@ -76,7 +77,7 @@ func Start(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 }
 
 // Stop FullStop = true stops to "Stop" (90° blade angle), while FullStop = false stops to "Stop60"
-func Stop(Server gopcxmlda.Server, UserId uint64, FullStop bool, ForceExplicitCommand bool, PlantNo ...uint8) ([]bool, []error) {
+func Stop(ctx context.Context, Server gopcxmlda.Server, UserId uint64, FullStop bool, ForceExplicitCommand bool, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var stopped []bool
 	if len(PlantNo) == 0 {
@@ -96,14 +97,14 @@ func Stop(Server gopcxmlda.Server, UserId uint64, FullStop bool, ForceExplicitCo
 		CtrlValue = 1
 	}
 	// check if Server is connected
-	if available, err := serverAvailable(Server); !available {
+	if available, err := serverAvailable(ctx, Server); !available {
 		for range PlantNo {
 			errList = append(errList, err)
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
-	plantState, err := getPlantCtrlOrRbhState(Server, "Ctrl", PlantNo)
+	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Ctrl", PlantNo)
 	if err != nil {
 		for range PlantNo {
 			errList = append(errList, err)
@@ -131,7 +132,7 @@ func Stop(Server gopcxmlda.Server, UserId uint64, FullStop bool, ForceExplicitCo
 	for range PlantNoToStop {
 		Value.CtrlAction = append(Value.CtrlAction, true)
 	}
-	stoppedFiltered, errListFiltered := controlProcedure(Server, UserId, Value, PlantNoToStop...)
+	stoppedFiltered, errListFiltered := controlProcedure(ctx, Server, UserId, Value, PlantNoToStop...)
 	if len(errListFiltered) > 0 {
 		for i, err := range errListFiltered {
 			if err != nil {
@@ -153,7 +154,7 @@ func Stop(Server gopcxmlda.Server, UserId uint64, FullStop bool, ForceExplicitCo
 	return stopped, errList
 }
 
-func Reset(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+func Reset(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var resetted []bool
 	if len(PlantNo) == 0 {
@@ -167,14 +168,14 @@ func Reset(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 	}
 	Action := "Reset"
 	// check if Server is connected
-	if available, err := serverAvailable(Server); !available {
+	if available, err := serverAvailable(ctx, Server); !available {
 		for range PlantNo {
 			errList = append(errList, err)
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
 	// Reset Plants
-	resetted, errList = resetProcedure(Server, UserId, PlantNo...)
+	resetted, errList = resetProcedure(ctx, Server, UserId, PlantNo...)
 	if len(errList) > 0 {
 		for i, err := range errList {
 			if err != nil {
@@ -185,7 +186,7 @@ func Reset(Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 	return resetted, errList
 }
 
-func RbhOn(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+func RbhOn(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var rbhOn []bool
 	if len(PlantNo) == 0 {
@@ -198,14 +199,14 @@ func RbhOn(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 		}
 	}
 	// check if Server is connected
-	if available, err := serverAvailable(server); !available {
+	if available, err := serverAvailable(ctx, Server); !available {
 		for range PlantNo {
 			errList = append(errList, err)
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
-	plantState, err := getPlantCtrlOrRbhState(server, "Rbh", PlantNo)
+	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
 	if err != nil {
 		for range PlantNo {
 			errList = append(errList, err)
@@ -233,7 +234,7 @@ func RbhOn(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 	for range PlantNoToRbhOn {
 		Value.RbhAction = append(Value.RbhAction, true)
 	}
-	rbhOnFiltered, errListFiltered := controlProcedure(server, UserId, Value, PlantNoToRbhOn...)
+	rbhOnFiltered, errListFiltered := controlProcedure(ctx, Server, UserId, Value, PlantNoToRbhOn...)
 	if len(errListFiltered) > 0 {
 		for i, err := range errListFiltered {
 			if err != nil {
@@ -255,7 +256,7 @@ func RbhOn(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []
 	return rbhOn, errList
 }
 
-func RbhAutoOff(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+func RbhAutoOff(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var rbhAutoOff []bool
 	if len(PlantNo) == 0 {
@@ -268,14 +269,14 @@ func RbhAutoOff(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]boo
 		}
 	}
 	// check if Server is connected
-	if available, err := serverAvailable(server); !available {
+	if available, err := serverAvailable(ctx, Server); !available {
 		for range PlantNo {
 			errList = append(errList, err)
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
-	plantState, err := getPlantCtrlOrRbhState(server, "Rbh", PlantNo)
+	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
 	if err != nil {
 		for range PlantNo {
 			errList = append(errList, err)
@@ -303,7 +304,7 @@ func RbhAutoOff(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]boo
 	for range PlantNoToRbhAutoOff {
 		Value.RbhAction = append(Value.RbhAction, true)
 	}
-	rbhAutoOffFiltered, errListFiltered := controlProcedure(server, UserId, Value, PlantNoToRbhAutoOff...)
+	rbhAutoOffFiltered, errListFiltered := controlProcedure(ctx, Server, UserId, Value, PlantNoToRbhAutoOff...)
 	if len(errListFiltered) > 0 {
 		for i, err := range errListFiltered {
 			if err != nil {
@@ -325,7 +326,7 @@ func RbhAutoOff(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]boo
 	return rbhAutoOff, errList
 }
 
-func RbhStandard(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+func RbhStandard(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var rbhStandard []bool
 	if len(PlantNo) == 0 {
@@ -338,14 +339,14 @@ func RbhStandard(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bo
 		}
 	}
 	// check if Server is connected
-	if available, err := serverAvailable(server); !available {
+	if available, err := serverAvailable(ctx, Server); !available {
 		for range PlantNo {
 			errList = append(errList, err)
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
-	plantState, err := getPlantCtrlOrRbhState(server, "Rbh", PlantNo)
+	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
 	if err != nil {
 		for range PlantNo {
 			errList = append(errList, err)
@@ -373,7 +374,7 @@ func RbhStandard(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bo
 	for range PlantNoToRbhStandard {
 		Value.RbhAction = append(Value.RbhAction, true)
 	}
-	rbhStandardFiltered, errListFiltered := controlProcedure(server, UserId, Value, PlantNoToRbhStandard...)
+	rbhStandardFiltered, errListFiltered := controlProcedure(ctx, Server, UserId, Value, PlantNoToRbhStandard...)
 	if len(errListFiltered) > 0 {
 		for i, err := range errListFiltered {
 			if err != nil {
@@ -396,7 +397,7 @@ func RbhStandard(server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bo
 }
 
 // ControlAndRbh Set Ctrl and Rbh values for plants at the same time
-func ControlAndRbh(Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhValue, PlantNo ...uint8) ([]bool, []error) {
+func ControlAndRbh(ctx context.Context, Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhValue, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var controlled []bool
 	if len(PlantNo) == 0 {
@@ -409,7 +410,7 @@ func ControlAndRbh(Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhV
 		}
 	}
 	// check if Server is connected
-	if available, err := serverAvailable(Server); !available {
+	if available, err := serverAvailable(ctx, Server); !available {
 		for range PlantNo {
 			errList = append(errList, err)
 		}
@@ -420,7 +421,7 @@ func ControlAndRbh(Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhV
 	var CtrlState []PlantState
 	var RbhState []PlantState
 	if Values.SetCtrlValue {
-		CtrlState, err = getPlantCtrlOrRbhState(Server, "Ctrl", PlantNo)
+		CtrlState, err = getPlantCtrlOrRbhState(ctx, Server, "Ctrl", PlantNo)
 		if err != nil {
 			for range PlantNo {
 				errList = append(errList, err)
@@ -445,7 +446,7 @@ func ControlAndRbh(Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhV
 		}
 	}
 	if Values.SetRbhValue {
-		RbhState, err = getPlantCtrlOrRbhState(Server, "Rbh", PlantNo)
+		RbhState, err = getPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
 		if err != nil {
 			for range PlantNo {
 				errList = append(errList, err)
@@ -485,7 +486,7 @@ func ControlAndRbh(Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhV
 		}
 	}
 	// control plants
-	controlledFiltered, errListFiltered := controlProcedure(Server, UserId, Values, PlantNoToControl...)
+	controlledFiltered, errListFiltered := controlProcedure(ctx, Server, UserId, Values, PlantNoToControl...)
 	if len(errListFiltered) > 0 {
 		for i, err := range errListFiltered {
 			if err != nil {
@@ -507,21 +508,21 @@ func ControlAndRbh(Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhV
 	return controlled, errList
 }
 
-func Turbines(Server gopcxmlda.Server) (TurbineInfo, error) {
+func Turbines(ctx context.Context, Server gopcxmlda.Server) (TurbineInfo, error) {
 	// check if Server is connected
-	if available, err := serverAvailable(Server); !available {
+	if available, err := serverAvailable(ctx, Server); !available {
 		return TurbineInfo{}, err
 	}
 	// Browse for all Turbines
 	var ClientRequestHandle string
 	options := gopcxmlda.TBrowseOptions{}
-	b, err := Server.Browse("Loc/Wec", &ClientRequestHandle, "", options)
+	b, err := Server.Browse(ctx, "Loc/Wec", &ClientRequestHandle, "", options)
 	if err != nil {
 		return TurbineInfo{}, err
 	}
 	var T TurbineInfo
 	T.PlantNo = filterPlants(b)
-	err = getPlantInfo(Server, &T)
+	err = getPlantInfo(ctx, Server, &T)
 	if err != nil {
 		return T, err
 	}
@@ -529,10 +530,10 @@ func Turbines(Server gopcxmlda.Server) (TurbineInfo, error) {
 }
 
 // ParkNoMatch Read the Park Number from the Server and compare it with the provided ParkNo
-func ParkNoMatch(Server gopcxmlda.Server, ParkNo uint64, checkAvailable bool) (bool, error) {
+func ParkNoMatch(ctx context.Context, Server gopcxmlda.Server, ParkNo uint64, checkAvailable bool) (bool, error) {
 	if checkAvailable {
 		// check if Server is connected
-		if available, err := serverAvailable(Server); !available {
+		if available, err := serverAvailable(ctx, Server); !available {
 			return false, err
 		}
 	}
@@ -547,7 +548,7 @@ func ParkNoMatch(Server gopcxmlda.Server, ParkNo uint64, checkAvailable bool) (b
 			ItemName: "Loc/LocNo",
 		},
 	}
-	value, err := Server.Read(Item, &handle1, &handle2, "", options)
+	value, err := Server.Read(ctx, Item, &handle1, &handle2, "", options)
 	if err != nil {
 		return false, err
 	}

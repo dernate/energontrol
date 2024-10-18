@@ -1,6 +1,7 @@
 package energontrol
 
 import (
+	"context"
 	"fmt"
 	"github.com/dernate/gopcxmlda"
 	"github.com/joho/godotenv"
@@ -28,7 +29,7 @@ func TestAvailable(t *testing.T) {
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
-	available, err := serverAvailable(Server)
+	available, err := serverAvailable(context.Background(), Server)
 	if err != nil {
 		t.Errorf("Error: %s", err)
 	} else {
@@ -99,7 +100,7 @@ func TestStart(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 	PlantNo := []uint8{2, 4}
-	started, errList := Start(Server, UserId, PlantNo...)
+	started, errList := Start(context.Background(), Server, UserId, PlantNo...)
 	if len(errList) > 0 {
 		for _, err := range errList {
 			if err != nil {
@@ -133,7 +134,7 @@ func TestStart(t *testing.T) {
 		"returnItemPath": true,
 		"returnItemName": true,
 	}
-	CtrlState, err := Server.Read(item, &ClientRequestHandle, &ClientItemHandles, "", options)
+	CtrlState, err := Server.Read(context.Background(), item, &ClientRequestHandle, &ClientItemHandles, "", options)
 	if err != nil {
 		t.Fatal(err)
 	} else {
@@ -172,7 +173,7 @@ func TestStop(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 	PlantNo := []uint8{2, 4}
-	stopped1, errList1 := Stop(Server, UserId, false, true, PlantNo[0])
+	stopped1, errList1 := Stop(context.Background(), Server, UserId, false, true, PlantNo[0])
 	if len(errList1) > 0 {
 		for _, err := range errList1 {
 			if err != nil {
@@ -180,7 +181,7 @@ func TestStop(t *testing.T) {
 			}
 		}
 	}
-	stopped2, errList2 := Stop(Server, UserId, true, true, PlantNo[1])
+	stopped2, errList2 := Stop(context.Background(), Server, UserId, true, true, PlantNo[1])
 	if len(errList2) > 0 {
 		for _, err := range errList2 {
 			if err != nil {
@@ -215,7 +216,7 @@ func TestStop(t *testing.T) {
 		"returnItemPath": true,
 		"returnItemName": true,
 	}
-	CtrlState, err := Server.Read(items, &ClientRequestHandle, &ClientItemHandles, "", options)
+	CtrlState, err := Server.Read(context.Background(), items, &ClientRequestHandle, &ClientItemHandles, "", options)
 	if err != nil {
 		t.Fatal(err)
 	} else {
@@ -252,7 +253,7 @@ func TestSessionState(t *testing.T) {
 	}
 	PlantNo := []uint8{1, 3, 4}
 	WaitFor := WaitForState{}
-	s, err := sessionState(Server, "Ctrl", WaitFor, PlantNo...)
+	s, err := sessionState(context.Background(), Server, "Ctrl", WaitFor, PlantNo...)
 	if err != nil {
 		t.Errorf("Error: %s", err)
 	} else {
@@ -303,7 +304,7 @@ func TestReset(t *testing.T) {
 	if err != nil {
 		t.Errorf("Error: %s", err)
 	}
-	resetted, errList := Reset(Server, UserId, PlantNo...)
+	resetted, errList := Reset(context.Background(), Server, UserId, PlantNo...)
 	if len(errList) > 0 {
 		for _, err := range errList {
 			if err != nil {
@@ -418,7 +419,7 @@ func TestRbhOn(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 	PlantNo := []uint8{4}
-	rbhOn, errList := RbhOn(Server, UserId, PlantNo...)
+	rbhOn, errList := RbhOn(context.Background(), Server, UserId, PlantNo...)
 	if len(errList) > 0 {
 		for _, err := range errList {
 			if err != nil {
@@ -465,7 +466,7 @@ func TestRbhAutoOff(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 	PlantNo := []uint8{4}
-	rbhAutoOff, errList := RbhAutoOff(Server, UserId, PlantNo...)
+	rbhAutoOff, errList := RbhAutoOff(context.Background(), Server, UserId, PlantNo...)
 	if len(errList) > 0 {
 		for _, err := range errList {
 			if err != nil {
@@ -512,7 +513,7 @@ func TestRbhStandard(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 	PlantNo := []uint8{4}
-	rbhStandard, errList := RbhStandard(Server, UserId, PlantNo...)
+	rbhStandard, errList := RbhStandard(context.Background(), Server, UserId, PlantNo...)
 	if len(errList) > 0 {
 		for _, err := range errList {
 			if err != nil {
@@ -565,7 +566,7 @@ func TestControlAndRbh1(t *testing.T) {
 		SetRbhValue:  true,
 		RbhValue:     10,
 	}
-	retControlAndRbh, errList := ControlAndRbh(Server, UserId, Values, PlantNo...)
+	retControlAndRbh, errList := ControlAndRbh(context.Background(), Server, UserId, Values, PlantNo...)
 	var bErr bool
 	if len(errList) > 0 {
 		for _, err := range errList {
@@ -609,7 +610,7 @@ func TestControlAndRbh2(t *testing.T) {
 		SetRbhValue:  true,
 		RbhValue:     0,
 	}
-	retControlAndRbh, errList := ControlAndRbh(Server, UserId, Values, PlantNo...)
+	retControlAndRbh, errList := ControlAndRbh(context.Background(), Server, UserId, Values, PlantNo...)
 	var bErr bool
 	if len(errList) > 0 {
 		for _, err := range errList {
@@ -641,7 +642,7 @@ func TestTurbines(t *testing.T) {
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
-	turbines, err := Turbines(Server)
+	turbines, err := Turbines(context.Background(), Server)
 	if err != nil {
 		t.Errorf("Error: %s", err)
 	} else {
@@ -672,7 +673,7 @@ func TestParkNoMatch(t *testing.T) {
 		LocaleID: "en-us",
 		Timeout:  10,
 	}
-	match, err := ParkNoMatch(Server, ParkNo, true)
+	match, err := ParkNoMatch(context.Background(), Server, ParkNo, true)
 	if err != nil {
 		t.Errorf("Error: %s", err)
 	}
