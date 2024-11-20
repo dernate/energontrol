@@ -20,16 +20,16 @@ func Start(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo 
 	}
 	// check if Server is connected
 	if available, err := serverAvailable(ctx, Server); !available {
-		for range PlantNo {
-			errList = append(errList, err)
+		for idx := range PlantNo {
+			errList[idx] = err
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
 	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Ctrl", PlantNo)
 	if err != nil {
-		for range PlantNo {
-			errList = append(errList, err)
+		for idx := range PlantNo {
+			errList[idx] = err
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
@@ -98,16 +98,16 @@ func Stop(ctx context.Context, Server gopcxmlda.Server, UserId uint64, FullStop 
 	}
 	// check if Server is connected
 	if available, err := serverAvailable(ctx, Server); !available {
-		for range PlantNo {
-			errList = append(errList, err)
+		for idx := range PlantNo {
+			errList[idx] = err
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
 	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Ctrl", PlantNo)
 	if err != nil {
-		for range PlantNo {
-			errList = append(errList, err)
+		for idx := range PlantNo {
+			errList[idx] = err
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
@@ -169,8 +169,8 @@ func Reset(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo 
 	Action := "Reset"
 	// check if Server is connected
 	if available, err := serverAvailable(ctx, Server); !available {
-		for range PlantNo {
-			errList = append(errList, err)
+		for idx := range PlantNo {
+			errList[idx] = err
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
@@ -200,16 +200,16 @@ func RbhOn(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo 
 	}
 	// check if Server is connected
 	if available, err := serverAvailable(ctx, Server); !available {
-		for range PlantNo {
-			errList = append(errList, err)
+		for idx := range PlantNo {
+			errList[idx] = err
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
 	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
 	if err != nil {
-		for range PlantNo {
-			errList = append(errList, err)
+		for idx := range PlantNo {
+			errList[idx] = err
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
@@ -270,16 +270,16 @@ func RbhAutoOff(ctx context.Context, Server gopcxmlda.Server, UserId uint64, Pla
 	}
 	// check if Server is connected
 	if available, err := serverAvailable(ctx, Server); !available {
-		for range PlantNo {
-			errList = append(errList, err)
+		for idx := range PlantNo {
+			errList[idx] = err
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
 	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
 	if err != nil {
-		for range PlantNo {
-			errList = append(errList, err)
+		for idx := range PlantNo {
+			errList[idx] = err
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
@@ -340,16 +340,16 @@ func RbhStandard(ctx context.Context, Server gopcxmlda.Server, UserId uint64, Pl
 	}
 	// check if Server is connected
 	if available, err := serverAvailable(ctx, Server); !available {
-		for range PlantNo {
-			errList = append(errList, err)
+		for idx := range PlantNo {
+			errList[idx] = err
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
 	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
 	if err != nil {
-		for range PlantNo {
-			errList = append(errList, err)
+		for idx := range PlantNo {
+			errList[idx] = err
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
@@ -411,8 +411,8 @@ func ControlAndRbh(ctx context.Context, Server gopcxmlda.Server, UserId uint64, 
 	}
 	// check if Server is connected
 	if available, err := serverAvailable(ctx, Server); !available {
-		for range PlantNo {
-			errList = append(errList, err)
+		for idx := range PlantNo {
+			errList[idx] = err
 		}
 		return make([]bool, len(PlantNo)), errList
 	}
@@ -423,9 +423,9 @@ func ControlAndRbh(ctx context.Context, Server gopcxmlda.Server, UserId uint64, 
 	if Values.SetCtrlValue {
 		CtrlState, err = getPlantCtrlOrRbhState(ctx, Server, "Ctrl", PlantNo)
 		if err != nil {
-			for range PlantNo {
-				errList = append(errList, err)
-				controlled = append(controlled, false)
+			for idx := range PlantNo {
+				errList[idx] = err
+				controlled[idx] = false
 			}
 			return controlled, errList
 		}
@@ -448,9 +448,9 @@ func ControlAndRbh(ctx context.Context, Server gopcxmlda.Server, UserId uint64, 
 	if Values.SetRbhValue {
 		RbhState, err = getPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
 		if err != nil {
-			for range PlantNo {
-				errList = append(errList, err)
-				controlled = append(controlled, false)
+			for idx := range PlantNo {
+				errList[idx] = err
+				controlled[idx] = false
 			}
 			return controlled, errList
 		}

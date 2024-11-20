@@ -27,7 +27,7 @@ func TestAvailable(t *testing.T) {
 	Server := gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
-		Timeout:  10,
+		Timeout:  10 * time.Second,
 	}
 	available, err := serverAvailable(context.Background(), Server)
 	if err != nil {
@@ -92,7 +92,7 @@ func TestStart(t *testing.T) {
 	Server := gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
-		Timeout:  10,
+		Timeout:  10 * time.Second,
 	}
 	userIdStr := os.Getenv("USERID")
 	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
@@ -165,7 +165,7 @@ func TestStop(t *testing.T) {
 	Server := gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
-		Timeout:  10,
+		Timeout:  10 * time.Second,
 	}
 	userIdStr := os.Getenv("USERID")
 	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
@@ -249,7 +249,7 @@ func TestSessionState(t *testing.T) {
 	Server := gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
-		Timeout:  10,
+		Timeout:  10 * time.Second,
 	}
 	PlantNo := []uint8{1, 3, 4}
 	WaitFor := WaitForState{}
@@ -296,7 +296,7 @@ func TestReset(t *testing.T) {
 	Server := gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
-		Timeout:  10,
+		Timeout:  10 * time.Second,
 	}
 	PlantNo := []uint8{2}
 	userIdStr := os.Getenv("USERID")
@@ -411,7 +411,7 @@ func TestRbhOn(t *testing.T) {
 	Server := gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
-		Timeout:  10,
+		Timeout:  10 * time.Second,
 	}
 	userIdStr := os.Getenv("USERID")
 	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
@@ -458,7 +458,7 @@ func TestRbhAutoOff(t *testing.T) {
 	Server := gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
-		Timeout:  10,
+		Timeout:  10 * time.Second,
 	}
 	userIdStr := os.Getenv("USERID")
 	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
@@ -505,7 +505,7 @@ func TestRbhStandard(t *testing.T) {
 	Server := gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
-		Timeout:  10,
+		Timeout:  10 * time.Second,
 	}
 	userIdStr := os.Getenv("USERID")
 	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
@@ -552,7 +552,7 @@ func TestControlAndRbh1(t *testing.T) {
 	Server := gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
-		Timeout:  10,
+		Timeout:  10 * time.Second,
 	}
 	userIdStr := os.Getenv("USERID")
 	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
@@ -596,7 +596,7 @@ func TestControlAndRbh2(t *testing.T) {
 	Server := gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
-		Timeout:  10,
+		Timeout:  10 * time.Second,
 	}
 	userIdStr := os.Getenv("USERID")
 	UserId, err := strconv.ParseUint(userIdStr, 10, 64)
@@ -640,7 +640,7 @@ func TestTurbines(t *testing.T) {
 	Server := gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
-		Timeout:  10,
+		Timeout:  10 * time.Second,
 	}
 	turbines, err := Turbines(context.Background(), Server)
 	if err != nil {
@@ -671,7 +671,7 @@ func TestParkNoMatch(t *testing.T) {
 	Server := gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
-		Timeout:  10,
+		Timeout:  10 * time.Second,
 	}
 	match, err := ParkNoMatch(context.Background(), Server, ParkNo, true)
 	if err != nil {
