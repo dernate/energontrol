@@ -736,6 +736,22 @@ func getPlantInfo(ctx context.Context, Server gopcxmlda.Server, T *TurbineInfo) 
 				T.Para[plant] = true
 			}
 		}
+		// set false values for plants that have no Ctrl/Rbh/Reset/IceDet/...
+		if _, ok := T.Ctrl[plant]; !ok {
+			T.Ctrl[plant] = false
+		}
+		if _, ok := T.Rbh[plant]; !ok {
+			T.Rbh[plant] = false
+		}
+		if _, ok := T.Reset[plant]; !ok {
+			T.Reset[plant] = false
+		}
+		if _, ok := T.IceDet[plant]; !ok {
+			T.IceDet[plant] = false
+		}
+		if _, ok := T.Para[plant]; !ok {
+			T.Para[plant] = false
+		}
 	}
 	return nil
 }
