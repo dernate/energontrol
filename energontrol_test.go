@@ -29,7 +29,7 @@ func TestAvailable(t *testing.T) {
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
 	}
-	available, err := serverAvailable(context.Background(), Server)
+	available, err := ServerAvailable(context.Background(), Server)
 	if err != nil {
 		t.Errorf("Error: %s", err)
 	} else {

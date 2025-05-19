@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func serverAvailable(ctx context.Context, Server gopcxmlda.Server) (bool, error) {
+func ServerAvailable(ctx context.Context, Server gopcxmlda.Server) (bool, error) {
 	// check if Server is connected
 	var handle string
 	status, err := Server.GetStatus(ctx, &handle, "")

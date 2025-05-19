@@ -19,7 +19,7 @@ func Start(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo 
 		}
 	}
 	// check if Server is connected
-	if available, err := serverAvailable(ctx, Server); !available {
+	if available, err := ServerAvailable(ctx, Server); !available {
 		for idx := range PlantNo {
 			errList[idx] = err
 		}
@@ -97,7 +97,7 @@ func Stop(ctx context.Context, Server gopcxmlda.Server, UserId uint64, FullStop 
 		CtrlValue = 1
 	}
 	// check if Server is connected
-	if available, err := serverAvailable(ctx, Server); !available {
+	if available, err := ServerAvailable(ctx, Server); !available {
 		for idx := range PlantNo {
 			errList[idx] = err
 		}
@@ -168,7 +168,7 @@ func Reset(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo 
 	}
 	Action := "Reset"
 	// check if Server is connected
-	if available, err := serverAvailable(ctx, Server); !available {
+	if available, err := ServerAvailable(ctx, Server); !available {
 		for idx := range PlantNo {
 			errList[idx] = err
 		}
@@ -199,7 +199,7 @@ func RbhOn(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo 
 		}
 	}
 	// check if Server is connected
-	if available, err := serverAvailable(ctx, Server); !available {
+	if available, err := ServerAvailable(ctx, Server); !available {
 		for idx := range PlantNo {
 			errList[idx] = err
 		}
@@ -269,7 +269,7 @@ func RbhAutoOff(ctx context.Context, Server gopcxmlda.Server, UserId uint64, Pla
 		}
 	}
 	// check if Server is connected
-	if available, err := serverAvailable(ctx, Server); !available {
+	if available, err := ServerAvailable(ctx, Server); !available {
 		for idx := range PlantNo {
 			errList[idx] = err
 		}
@@ -339,7 +339,7 @@ func RbhStandard(ctx context.Context, Server gopcxmlda.Server, UserId uint64, Pl
 		}
 	}
 	// check if Server is connected
-	if available, err := serverAvailable(ctx, Server); !available {
+	if available, err := ServerAvailable(ctx, Server); !available {
 		for idx := range PlantNo {
 			errList[idx] = err
 		}
@@ -410,7 +410,7 @@ func ControlAndRbh(ctx context.Context, Server gopcxmlda.Server, UserId uint64, 
 		}
 	}
 	// check if Server is connected
-	if available, err := serverAvailable(ctx, Server); !available {
+	if available, err := ServerAvailable(ctx, Server); !available {
 		for idx := range PlantNo {
 			errList[idx] = err
 		}
@@ -510,7 +510,7 @@ func ControlAndRbh(ctx context.Context, Server gopcxmlda.Server, UserId uint64, 
 
 func Turbines(ctx context.Context, Server gopcxmlda.Server) (TurbineInfo, error) {
 	// check if Server is connected
-	if available, err := serverAvailable(ctx, Server); !available {
+	if available, err := ServerAvailable(ctx, Server); !available {
 		return TurbineInfo{}, err
 	}
 	// Browse for all Turbines
@@ -533,7 +533,7 @@ func Turbines(ctx context.Context, Server gopcxmlda.Server) (TurbineInfo, error)
 func ParkNoMatch(ctx context.Context, Server gopcxmlda.Server, ParkNo uint64, checkAvailable bool) (bool, error) {
 	if checkAvailable {
 		// check if Server is connected
-		if available, err := serverAvailable(ctx, Server); !available {
+		if available, err := ServerAvailable(ctx, Server); !available {
 			return false, err
 		}
 	}
