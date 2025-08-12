@@ -20,35 +20,6 @@ func ServerAvailable(ctx context.Context, Server gopcxmlda.Server) (bool, error)
 	return status.Response.Result.ServerState == "running", nil
 }
 
-func getPlantCtrlOrRbhState(ctx context.Context, Server gopcxmlda.Server, CtrlOrRbh string, PlantNo []uint8) ([]PlantState, error) {
-	if CtrlOrRbh != "Ctrl" && CtrlOrRbh != "Rbh" {
-		return nil, fmt.Errorf("CtrlOrRbh must be either Ctrl or Rbh")
-	}
-	// check plant ctrl state
-	var handle1 string
-	var handle2 []string
-	options := map[string]interface{}{
-		"returnItemName": true,
-	}
-	var items []gopcxmlda.TItem
-	for _, plant := range PlantNo {
-		items = append(items, gopcxmlda.TItem{
-			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/%s", plant, CtrlOrRbh),
-		})
-	}
-	value, err := Server.Read(ctx, items, &handle1, &handle2, "", options)
-	if err != nil {
-		return nil, err
-	} else {
-		plantState := make([]PlantState, len(PlantNo))
-		for i, item := range value.Response.ItemList.Items {
-			plantState[i].PlantNo = PlantNo[i]
-			plantState[i].CtrlState = item.Value.Value.(uint64)
-		}
-		return plantState, nil
-	}
-}
-
 func setActionToStart(plantState *[]PlantState) {
 	for i, state := range *plantState {
 		// If CtrlState is 0, the plant is already started.

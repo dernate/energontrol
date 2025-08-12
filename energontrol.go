@@ -3,6 +3,7 @@ package energontrol
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/dernate/gopcxmlda"
 )
 
@@ -26,7 +27,7 @@ func Start(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo 
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
-	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Ctrl", PlantNo)
+	plantState, err := GetPlantCtrlOrRbhState(ctx, Server, "Ctrl", PlantNo)
 	if err != nil {
 		for idx := range PlantNo {
 			errList[idx] = err
@@ -104,7 +105,7 @@ func Stop(ctx context.Context, Server gopcxmlda.Server, UserId uint64, FullStop 
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
-	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Ctrl", PlantNo)
+	plantState, err := GetPlantCtrlOrRbhState(ctx, Server, "Ctrl", PlantNo)
 	if err != nil {
 		for idx := range PlantNo {
 			errList[idx] = err
@@ -206,7 +207,7 @@ func RbhOn(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo 
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
-	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
+	plantState, err := GetPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
 	if err != nil {
 		for idx := range PlantNo {
 			errList[idx] = err
@@ -276,7 +277,7 @@ func RbhAutoOff(ctx context.Context, Server gopcxmlda.Server, UserId uint64, Pla
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
-	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
+	plantState, err := GetPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
 	if err != nil {
 		for idx := range PlantNo {
 			errList[idx] = err
@@ -346,7 +347,7 @@ func RbhStandard(ctx context.Context, Server gopcxmlda.Server, UserId uint64, Pl
 		return make([]bool, len(PlantNo)), errList
 	}
 	// check if plants have already the desired state
-	plantState, err := getPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
+	plantState, err := GetPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
 	if err != nil {
 		for idx := range PlantNo {
 			errList[idx] = err
@@ -421,7 +422,7 @@ func ControlAndRbh(ctx context.Context, Server gopcxmlda.Server, UserId uint64, 
 	var CtrlState []PlantState
 	var RbhState []PlantState
 	if Values.SetCtrlValue {
-		CtrlState, err = getPlantCtrlOrRbhState(ctx, Server, "Ctrl", PlantNo)
+		CtrlState, err = GetPlantCtrlOrRbhState(ctx, Server, "Ctrl", PlantNo)
 		if err != nil {
 			for idx := range PlantNo {
 				errList[idx] = err
@@ -446,7 +447,7 @@ func ControlAndRbh(ctx context.Context, Server gopcxmlda.Server, UserId uint64, 
 		}
 	}
 	if Values.SetRbhValue {
-		RbhState, err = getPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
+		RbhState, err = GetPlantCtrlOrRbhState(ctx, Server, "Rbh", PlantNo)
 		if err != nil {
 			for idx := range PlantNo {
 				errList[idx] = err
@@ -556,4 +557,33 @@ func ParkNoMatch(ctx context.Context, Server gopcxmlda.Server, ParkNo uint64, ch
 		return true, nil
 	}
 	return false, nil
+}
+
+func GetPlantCtrlOrRbhState(ctx context.Context, Server gopcxmlda.Server, CtrlOrRbh string, PlantNo []uint8) ([]PlantState, error) {
+	if CtrlOrRbh != "Ctrl" && CtrlOrRbh != "Rbh" {
+		return nil, fmt.Errorf("CtrlOrRbh must be either Ctrl or Rbh")
+	}
+	// check plant ctrl state
+	var handle1 string
+	var handle2 []string
+	options := map[string]interface{}{
+		"returnItemName": true,
+	}
+	var items []gopcxmlda.TItem
+	for _, plant := range PlantNo {
+		items = append(items, gopcxmlda.TItem{
+			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/%s", plant, CtrlOrRbh),
+		})
+	}
+	value, err := Server.Read(ctx, items, &handle1, &handle2, "", options)
+	if err != nil {
+		return nil, err
+	} else {
+		plantState := make([]PlantState, len(PlantNo))
+		for i, item := range value.Response.ItemList.Items {
+			plantState[i].PlantNo = PlantNo[i]
+			plantState[i].CtrlState = item.Value.Value.(uint64)
+		}
+		return plantState, nil
+	}
 }
