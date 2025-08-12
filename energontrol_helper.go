@@ -73,7 +73,7 @@ func setActionToStop(plantState *[]PlantState, ForceExplicitCommand bool, Action
 			if ForceExplicitCommand {
 				LogIfStateChangePermitted(state, state.PlantNo, Action)
 			} else {
-				LogIfStateChangePermitted(state, state.PlantNo, 2) // 2=="Stop". desiredState is just for the Log Message if even needed
+				LogIfStateChangePermitted(state, state.PlantNo, Action) // 2=="Stop". desiredState is just for the Log Message if even needed
 			}
 		} else {
 			(*plantState)[i].Action = true
