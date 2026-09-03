@@ -22,16 +22,23 @@ Basic usage is as follows:
 
 ```go
 package main
+
 import (
-    "github.com/dernate/energontrol"
+	"net/url"
+	"time"
+
+	"github.com/dernate/energontrol"
+	"github.com/dernate/gopcxmlda"
 )
 
 func main() {
 	_url, _ := url.Parse("http://your-opc-server:port/DA")
-	s := Server{
-	    _url,
-		"en-US", 
-		10,
+	// Server is passed as a pointer. Reuse the same instance for all calls,
+	// so its underlying http.Client (and its connection pool) is reused.
+	Server := &gopcxmlda.Server{
+		Url:      _url,
+		LocaleID: "en-US",
+		Timeout:  10 * time.Second,
 	}
 }
 ```

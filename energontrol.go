@@ -7,7 +7,7 @@ import (
 	"github.com/dernate/gopcxmlda"
 )
 
-func Start(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+func Start(ctx context.Context, Server *gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var started []bool
 	if len(PlantNo) == 0 {
@@ -78,7 +78,7 @@ func Start(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo 
 }
 
 // Stop FullStop = true stops to "Stop" (90° blade angle), while FullStop = false stops to "Stop60"
-func Stop(ctx context.Context, Server gopcxmlda.Server, UserId uint64, FullStop bool, ForceExplicitCommand bool, PlantNo ...uint8) ([]bool, []error) {
+func Stop(ctx context.Context, Server *gopcxmlda.Server, UserId uint64, FullStop bool, ForceExplicitCommand bool, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var stopped []bool
 	if len(PlantNo) == 0 {
@@ -155,7 +155,7 @@ func Stop(ctx context.Context, Server gopcxmlda.Server, UserId uint64, FullStop 
 	return stopped, errList
 }
 
-func Reset(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+func Reset(ctx context.Context, Server *gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var resetted []bool
 	if len(PlantNo) == 0 {
@@ -187,7 +187,7 @@ func Reset(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo 
 	return resetted, errList
 }
 
-func RbhOn(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+func RbhOn(ctx context.Context, Server *gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var rbhOn []bool
 	if len(PlantNo) == 0 {
@@ -257,7 +257,7 @@ func RbhOn(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo 
 	return rbhOn, errList
 }
 
-func RbhAutoOff(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+func RbhAutoOff(ctx context.Context, Server *gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var rbhAutoOff []bool
 	if len(PlantNo) == 0 {
@@ -327,7 +327,7 @@ func RbhAutoOff(ctx context.Context, Server gopcxmlda.Server, UserId uint64, Pla
 	return rbhAutoOff, errList
 }
 
-func RbhStandard(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+func RbhStandard(ctx context.Context, Server *gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var rbhStandard []bool
 	if len(PlantNo) == 0 {
@@ -398,7 +398,7 @@ func RbhStandard(ctx context.Context, Server gopcxmlda.Server, UserId uint64, Pl
 }
 
 // ControlAndRbh Set Ctrl and Rbh values for plants at the same time
-func ControlAndRbh(ctx context.Context, Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhValue, PlantNo ...uint8) ([]bool, []error) {
+func ControlAndRbh(ctx context.Context, Server *gopcxmlda.Server, UserId uint64, Values ControlAndRbhValue, PlantNo ...uint8) ([]bool, []error) {
 	var errList []error
 	var controlled []bool
 	if len(PlantNo) == 0 {
@@ -509,7 +509,7 @@ func ControlAndRbh(ctx context.Context, Server gopcxmlda.Server, UserId uint64, 
 	return controlled, errList
 }
 
-func Turbines(ctx context.Context, Server gopcxmlda.Server) (TurbineInfo, error) {
+func Turbines(ctx context.Context, Server *gopcxmlda.Server) (TurbineInfo, error) {
 	// check if Server is connected
 	if available, err := ServerAvailable(ctx, Server); !available {
 		return TurbineInfo{}, err
@@ -531,7 +531,7 @@ func Turbines(ctx context.Context, Server gopcxmlda.Server) (TurbineInfo, error)
 }
 
 // ParkNoMatch Read the Park Number from the Server and compare it with the provided ParkNo
-func ParkNoMatch(ctx context.Context, Server gopcxmlda.Server, ParkNo uint64, checkAvailable bool) (bool, error) {
+func ParkNoMatch(ctx context.Context, Server *gopcxmlda.Server, ParkNo uint64, checkAvailable bool) (bool, error) {
 	if checkAvailable {
 		// check if Server is connected
 		if available, err := ServerAvailable(ctx, Server); !available {
@@ -559,7 +559,10 @@ func ParkNoMatch(ctx context.Context, Server gopcxmlda.Server, ParkNo uint64, ch
 	return false, nil
 }
 
-func GetPlantCtrlOrRbhState(ctx context.Context, Server gopcxmlda.Server, CtrlOrRbh string, PlantNo []uint8) ([]PlantState, error) {
+func GetPlantCtrlOrRbhState(ctx context.Context, Server *gopcxmlda.Server, CtrlOrRbh string, PlantNo []uint8) ([]PlantState, error) {
+	if Server == nil {
+		return nil, errors.New("no Server provided")
+	}
 	if CtrlOrRbh != "Ctrl" && CtrlOrRbh != "Rbh" {
 		return nil, fmt.Errorf("CtrlOrRbh must be either Ctrl or Rbh")
 	}

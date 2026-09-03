@@ -2,6 +2,7 @@ package energontrol
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/dernate/gopcxmlda"
 	"math/rand"
@@ -10,7 +11,10 @@ import (
 	"time"
 )
 
-func ServerAvailable(ctx context.Context, Server gopcxmlda.Server) (bool, error) {
+func ServerAvailable(ctx context.Context, Server *gopcxmlda.Server) (bool, error) {
+	if Server == nil {
+		return false, errors.New("no Server provided")
+	}
 	// check if Server is connected
 	var handle string
 	status, err := Server.GetStatus(ctx, &handle, "")
@@ -90,7 +94,7 @@ func rbhStatusRight(actual uint64, desired uint64) bool {
 	}
 }
 
-func controlProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint64, Values ControlAndRbhValue, PlantNo ...uint8) ([]bool, []error) {
+func controlProcedure(ctx context.Context, Server *gopcxmlda.Server, UserId uint64, Values ControlAndRbhValue, PlantNo ...uint8) ([]bool, []error) {
 	if len(PlantNo) == 0 {
 		return nil, nil
 	}
@@ -150,7 +154,7 @@ func controlProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint6
 		if SesState[i] != 0 {
 			errMsg := fmt.Sprintf("Can't start session, %s", getSessionStateText(SesState[i]))
 			LogWarn(plant, Action, errMsg)
-			errList[i] = fmt.Errorf(errMsg)
+			errList[i] = errors.New(errMsg)
 			success[i] = false
 			continue
 		}
@@ -187,7 +191,7 @@ func controlProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint6
 		if SesState[i] != 1 {
 			errMsg := fmt.Sprintf("Session error for Plant %d, %s", plant, getSessionStateText(SesState[i]))
 			LogWarn(plant, Action, errMsg)
-			errList[i] = fmt.Errorf(errMsg)
+			errList[i] = errors.New(errMsg)
 			success[i] = false
 			continue
 		}
@@ -239,7 +243,7 @@ func controlProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint6
 		if SesState[i] != 2 {
 			errMsg := fmt.Sprintf("Session error for Plant %d, %s", plant, getSessionStateText(SesState[i]))
 			LogWarn(plant, Action, errMsg)
-			errList[i] = fmt.Errorf(errMsg)
+			errList[i] = errors.New(errMsg)
 			success[i] = false
 			continue
 		}
@@ -271,7 +275,7 @@ func controlProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint6
 		if SesState[i] != 4 {
 			errMsg := fmt.Sprintf("Session error for Plant %d, %s", plant, getSessionStateText(SesState[i]))
 			LogWarn(plant, Action, errMsg)
-			errList[i] = fmt.Errorf(errMsg)
+			errList[i] = errors.New(errMsg)
 			success[i] = false
 			continue
 		}
@@ -281,7 +285,7 @@ func controlProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint6
 }
 
 // Get the session state of a plant
-func sessionState(ctx context.Context, Server gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForState, PlantNo ...uint8) ([]uint16, error) {
+func sessionState(ctx context.Context, Server *gopcxmlda.Server, CtrlOrReset string, WaitFor WaitForState, PlantNo ...uint8) ([]uint16, error) {
 	if CtrlOrReset != "Ctrl" && CtrlOrReset != "Reset" {
 		return nil, fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
@@ -361,7 +365,7 @@ func generateSessionRequest(UserId uint64) SessionRequest {
 }
 
 // requestSession Request a session
-func requestSession(ctx context.Context, Server gopcxmlda.Server, SR SessionRequest, PlantNo uint8, CtrlOrReset string) error {
+func requestSession(ctx context.Context, Server *gopcxmlda.Server, SR SessionRequest, PlantNo uint8, CtrlOrReset string) error {
 	if CtrlOrReset != "Ctrl" && CtrlOrReset != "Reset" {
 		return fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
@@ -388,7 +392,7 @@ func requestSession(ctx context.Context, Server gopcxmlda.Server, SR SessionRequ
 	}
 }
 
-func getPublicKey(ctx context.Context, Server gopcxmlda.Server, PlantNo uint8, CtrlOrReset string) (uint64, error) {
+func getPublicKey(ctx context.Context, Server *gopcxmlda.Server, PlantNo uint8, CtrlOrReset string) (uint64, error) {
 	if CtrlOrReset != "Ctrl" && CtrlOrReset != "Reset" {
 		return 0, fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
@@ -412,7 +416,7 @@ func getPublicKey(ctx context.Context, Server gopcxmlda.Server, PlantNo uint8, C
 	}
 }
 
-func writeControlValue(ctx context.Context, Server gopcxmlda.Server, PlantNo uint8, CtrlValue uint64, PrivateKey uint16, PublicKey uint64, CtrlOrRbh string) error {
+func writeControlValue(ctx context.Context, Server *gopcxmlda.Server, PlantNo uint8, CtrlValue uint64, PrivateKey uint16, PublicKey uint64, CtrlOrRbh string) error {
 	if CtrlOrRbh != "Ctrl" && CtrlOrRbh != "Rbh" {
 		return fmt.Errorf("CtrlOrRbh must be either Ctrl or Rbh")
 	}
@@ -439,7 +443,7 @@ func writeControlValue(ctx context.Context, Server gopcxmlda.Server, PlantNo uin
 	}
 }
 
-func submitValue(ctx context.Context, Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, PublicKey uint64, CtrlOrReset string) error {
+func submitValue(ctx context.Context, Server *gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, PublicKey uint64, CtrlOrReset string) error {
 	if CtrlOrReset != "Ctrl" && CtrlOrReset != "Reset" {
 		return fmt.Errorf("CtrlOrReset must be either Ctrl or Reset")
 	}
@@ -466,7 +470,7 @@ func submitValue(ctx context.Context, Server gopcxmlda.Server, PlantNo uint8, Pr
 	}
 }
 
-func writeResetValue(ctx context.Context, Server gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, PublicKey uint64) error {
+func writeResetValue(ctx context.Context, Server *gopcxmlda.Server, PlantNo uint8, PrivateKey uint16, PublicKey uint64) error {
 	items := []gopcxmlda.TItem{
 		{
 			ItemName: fmt.Sprintf("Loc/Wec/Plant%d/Reset/SetReset", PlantNo),
@@ -490,7 +494,7 @@ func writeResetValue(ctx context.Context, Server gopcxmlda.Server, PlantNo uint8
 	}
 }
 
-func resetProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
+func resetProcedure(ctx context.Context, Server *gopcxmlda.Server, UserId uint64, PlantNo ...uint8) ([]bool, []error) {
 	var success []bool
 	var errList []error
 	SessionType := "Reset"
@@ -510,7 +514,7 @@ func resetProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint64,
 		if _sessionState != 0 {
 			errMsg := fmt.Sprintf("Can't start session, %s", getSessionStateText(_sessionState))
 			LogWarn(PlantNo[i], Action, errMsg)
-			errList = append(errList, fmt.Errorf(errMsg))
+			errList = append(errList, errors.New(errMsg))
 			success = append(success, false)
 			continue
 		}
@@ -538,7 +542,7 @@ func resetProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint64,
 		if SesState[0] != 1 {
 			errMsg := fmt.Sprintf("Session error for Plant %d, %s", PlantNo[i], getSessionStateText(SesState[0]))
 			LogWarn(PlantNo[i], Action, errMsg)
-			errList = append(errList, fmt.Errorf(errMsg))
+			errList = append(errList, errors.New(errMsg))
 			success = append(success, false)
 			continue
 		}
@@ -569,7 +573,7 @@ func resetProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint64,
 		if SesState[0] != 2 {
 			errMsg := fmt.Sprintf("Session error for Plant %d, %s", PlantNo[i], getSessionStateText(SesState[0]))
 			LogWarn(PlantNo[i], Action, errMsg)
-			errList = append(errList, fmt.Errorf(errMsg))
+			errList = append(errList, errors.New(errMsg))
 			success = append(success, false)
 			continue
 		}
@@ -594,7 +598,7 @@ func resetProcedure(ctx context.Context, Server gopcxmlda.Server, UserId uint64,
 		if SesState[0] != 4 {
 			errMsg := fmt.Sprintf("Session error for Plant %d, %s", PlantNo[i], getSessionStateText(SesState[0]))
 			LogWarn(PlantNo[i], Action, errMsg)
-			errList = append(errList, fmt.Errorf(errMsg))
+			errList = append(errList, errors.New(errMsg))
 			success = append(success, false)
 			continue
 		} else {
@@ -630,7 +634,7 @@ func filterPlants(b gopcxmlda.TBrowse) []uint8 {
 	return plants
 }
 
-func getPlantInfo(ctx context.Context, Server gopcxmlda.Server, T *TurbineInfo) error {
+func getPlantInfo(ctx context.Context, Server *gopcxmlda.Server, T *TurbineInfo) error {
 	if T.Ctrl == nil {
 		T.Ctrl = make(map[uint8]bool)
 	}
