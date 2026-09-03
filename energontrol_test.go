@@ -24,7 +24,7 @@ func TestAvailable(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 
-	Server := gopcxmlda.Server{
+	Server := &gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
@@ -49,7 +49,7 @@ func TestSetAction(t *testing.T) {
 		{PlantNo: 4, CtrlState: 1},
 		{PlantNo: 5, CtrlState: 2},
 	}
-	setActionToStop(&plantState2, true, CtrlValues["Stop"])
+	setActionToStop(&plantState2, true, CtrlValues["Stop90"])
 	plantState3 := []PlantState{
 		{PlantNo: 2, CtrlState: 0},
 		{PlantNo: 4, CtrlState: 1},
@@ -66,7 +66,7 @@ func TestSetAction(t *testing.T) {
 		t.Errorf("Error at Stop ForceExplicitCommand: %t, Action: %s", true, "Stop60")
 	}
 	if !(plantState2[0].Action == true && plantState2[1].Action == true && plantState2[2].Action == false) {
-		t.Errorf("Error at Stop ForceExplicitCommand: %t, Action: %s", true, "Stop")
+		t.Errorf("Error at Stop ForceExplicitCommand: %t, Action: %s", true, "Stop90")
 	}
 	if !(plantState3[0].Action == true && plantState3[1].Action == false && plantState3[2].Action == false) {
 		t.Errorf("Error at Stop ForceExplicitCommand: %t, Action: %s", false, "Stop60")
@@ -89,7 +89,7 @@ func TestStart(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 
-	Server := gopcxmlda.Server{
+	Server := &gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
@@ -162,7 +162,7 @@ func TestStop(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 
-	Server := gopcxmlda.Server{
+	Server := &gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
@@ -246,7 +246,7 @@ func TestSessionState(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 
-	Server := gopcxmlda.Server{
+	Server := &gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
@@ -265,18 +265,18 @@ func TestSessionState(t *testing.T) {
 func TestGetSessionStateText(t *testing.T) {
 	states := []uint16{0, 1, 2, 4, 5, 175, 234}
 	expected := []string{
-		"Session is Session free",
-		"Session is Session reserved",
-		"Session is Parameter input",
-		"Session is Waiting time session end",
-		"Session is Session blocked (global reservation)",
-		"Session is Insufficient rights",
+		"Session is 'Session free'",
+		"Session is 'Session reserved'",
+		"Session is 'Parameter input'",
+		"Session is 'Waiting time session end'",
+		"Session is 'Session blocked (global reservation)'",
+		"Session is 'Insufficient rights'",
 		"Unknown session state",
 	}
 	for i, state := range states {
 		s := getSessionStateText(state)
 		if s != expected[i] {
-			t.Errorf("Error: %s ; %s", s, expected[i])
+			t.Errorf("Error: got %s ; want %s", s, expected[i])
 		}
 	}
 	t.Log("Test passed")
@@ -293,7 +293,7 @@ func TestReset(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 
-	Server := gopcxmlda.Server{
+	Server := &gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
@@ -343,7 +343,7 @@ func TestGetRbhStateText(t *testing.T) {
 	for i, state := range states {
 		s := getRbhStateText(state)
 		if len(s) != len(expected[i]) {
-			t.Errorf("Error: %s ; %s", s, expected[i])
+			t.Errorf("Error: got %s ; want %s", s, expected[i])
 			bErr = true
 		} else {
 			sort.Strings(s)
@@ -351,7 +351,7 @@ func TestGetRbhStateText(t *testing.T) {
 			// check if the same values are in the slices
 			for j := range s {
 				if s[j] != expected[i][j] {
-					t.Errorf("Error: %s ; %s", s, expected[i])
+					t.Errorf("Error: got %s ; want %s", s, expected[i])
 					bErr = true
 					break
 				}
@@ -408,7 +408,7 @@ func TestRbhOn(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 
-	Server := gopcxmlda.Server{
+	Server := &gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
@@ -455,7 +455,7 @@ func TestRbhAutoOff(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 
-	Server := gopcxmlda.Server{
+	Server := &gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
@@ -502,7 +502,7 @@ func TestRbhStandard(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 
-	Server := gopcxmlda.Server{
+	Server := &gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
@@ -549,7 +549,7 @@ func TestControlAndRbh1(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 
-	Server := gopcxmlda.Server{
+	Server := &gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
@@ -593,7 +593,7 @@ func TestControlAndRbh2(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 
-	Server := gopcxmlda.Server{
+	Server := &gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
@@ -637,7 +637,7 @@ func TestTurbines(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 
-	Server := gopcxmlda.Server{
+	Server := &gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
@@ -668,7 +668,7 @@ func TestParkNoMatch(t *testing.T) {
 		t.Errorf("Error: %s", err)
 	}
 
-	Server := gopcxmlda.Server{
+	Server := &gopcxmlda.Server{
 		Url:      _url,
 		LocaleID: "en-us",
 		Timeout:  10 * time.Second,
