@@ -54,6 +54,12 @@ type sessionCred struct {
 // v1 seeded a fresh math/rand source from time.Now().UnixNano() on every call,
 // which is both predictable and prone to producing identical keys for plants
 // processed in the same nanosecond tick.
+//
+// The id is drawn from 1 to 19, which is what the session item accepts. Two
+// clients competing for one plant therefore draw the same id about once in
+// nineteen attempts, and in that case the ownership check confirms the other
+// client's reservation as this client's. The check narrows the race, it does not
+// close it; commands for one park belong in one process.
 func newSessionCred() (*sessionCred, error) {
 	// 1..19: a session id of 0 is reserved to mean "the server did not report
 	// one", so verification can tell that case from a real mismatch.
@@ -93,6 +99,10 @@ type tracker struct {
 	// written records the parameter items actually written per plant, so they
 	// can be read back before the session is submitted.
 	written map[uint8][]writeItem
+	// deadline is the moment the server drops the sessions this run reserved.
+	// It is zero until a reservation was attempted, because before that there
+	// is no session whose lifetime could run out.
+	deadline time.Time
 }
 
 func newTracker(cmds []plantCommand) *tracker {
@@ -143,6 +153,22 @@ func (t *tracker) failAll(err error) {
 	for _, p := range t.active() {
 		t.fail(p, err)
 	}
+}
+
+// expired reports whether the sessions this run reserved have outlived the
+// session lifetime.
+func (t *tracker) expired(now time.Time) bool {
+	return !t.deadline.IsZero() && !now.Before(t.deadline)
+}
+
+// waitDeadline is the moment a wait for a state transition has to give up: the
+// polling budget, or the end of the session lifetime if that comes first.
+func (t *tracker) waitDeadline(now time.Time, budget time.Duration) time.Time {
+	deadline := now.Add(budget)
+	if !t.deadline.IsZero() && t.deadline.Before(deadline) {
+		return t.deadline
+	}
+	return deadline
 }
 
 func (t *tracker) list() Results {
@@ -206,6 +232,13 @@ func (c *Client) run(ctx context.Context, p sessionProcedure, userID uint64, cmd
 		if len(t.active()) == 0 {
 			return t.list()
 		}
+		// Once the session lifetime has run out the server has dropped the
+		// reservation, so no later step can achieve anything — and writing into
+		// an expired session is exactly what this bound exists to prevent.
+		if t.expired(c.now()) {
+			t.failAll(ErrSessionExpired)
+			return t.list()
+		}
 		if err := step(); err != nil {
 			// A request-level failure says nothing about the individual plants,
 			// so every plant still in play inherits it.
@@ -234,7 +267,7 @@ func (c *Client) run(ctx context.Context, p sessionProcedure, userID uint64, cmd
 // failed with a SessionStateError, which unwraps to a specific sentinel such as
 // ErrSessionOccupied or ErrInsufficientRights.
 func (c *Client) waitState(ctx context.Context, t *tracker, kind SessionKind, want SessionState) error {
-	deadline := c.now().Add(c.pollTimeout)
+	deadline := t.waitDeadline(c.now(), c.pollTimeout)
 	var last map[uint8]SessionState
 	for {
 		if err := ctxErr(ctx); err != nil {
@@ -254,7 +287,7 @@ func (c *Client) waitState(ctx context.Context, t *tracker, kind SessionKind, wa
 		last = states
 		pending := false
 		for _, plant := range t.active() {
-			if s, ok := states[plant]; ok && s != want {
+			if s, ok := states[plant]; ok && !s.satisfies(want) {
 				pending = true
 				break
 			}
@@ -269,9 +302,19 @@ func (c *Client) waitState(ctx context.Context, t *tracker, kind SessionKind, wa
 			return err
 		}
 	}
+	// A wait that ran into the session lifetime rather than into its polling
+	// budget failed for a different reason, and the caller needs to be able to
+	// tell them apart: a state error invites a retry, an expired session says
+	// the reservation is gone. The state error is kept alongside, so
+	// errors.As still reports the state that was observed.
+	expired := t.expired(c.now())
 	for _, plant := range t.active() {
-		if s, ok := last[plant]; ok && s != want {
-			t.fail(plant, &SessionStateError{PlantNo: plant, Want: want, Got: s})
+		if s, ok := last[plant]; ok && !s.satisfies(want) {
+			var err error = &SessionStateError{PlantNo: plant, Want: want, Got: s}
+			if expired {
+				err = errors.Join(err, ErrSessionExpired)
+			}
+			t.fail(plant, err)
 		}
 	}
 	return nil
@@ -311,24 +354,24 @@ func (c *Client) sessionStates(ctx context.Context, kind SessionKind, plants []u
 
 // requestSessions reserves a session for every active plant, in one write.
 func (c *Client) requestSessions(ctx context.Context, t *tracker, kind SessionKind, userID uint64) error {
-	items := make([]writeItem, 0, len(t.active()))
-	owner := make(map[string]uint8, len(items))
-	for _, plant := range t.active() {
+	// The user id is the same for every plant, so it is a property of the
+	// request, not of a plant. Public entry points reject an out-of-range id
+	// before anything is sent; this is the last line of defence for a value
+	// that reached the procedure some other way.
+	user, err := longWord(userID, "user id")
+	if err != nil {
+		return err
+	}
+	plants := t.active()
+	items := make([]writeItem, 0, len(plants))
+	owner := make(map[string]uint8, len(plants))
+	for _, plant := range plants {
 		cred, err := newSessionCred()
 		if err != nil {
 			t.fail(plant, err)
 			continue
 		}
-		// Mark the session as requested before the write: if the write fails at
-		// transport level the server may still have reserved it, and a session
-		// that might be open has to be accounted for.
-		cred.requested = true
 		t.cred[plant] = cred
-		user, err := longWord(userID, "user id")
-		if err != nil {
-			t.fail(plant, err)
-			continue
-		}
 		name := sessionRequestItem(plant, kind)
 		owner[name] = plant
 		items = append(items, writeItem{
@@ -336,6 +379,15 @@ func (c *Client) requestSessions(ctx context.Context, t *tracker, kind SessionKi
 			Value: []uint32{uint32(cred.sessionID), user, uint32(cred.privateKey)},
 		})
 	}
+	// Mark the sessions as requested immediately before the write, and start
+	// the lifetime clock with it: if the write fails at transport level the
+	// server may still have reserved them, and a session that might be open has
+	// to be accounted for. Nothing before this point can leave one behind.
+	for _, plant := range owner {
+		t.cred[plant].requested = true
+	}
+	t.deadline = c.now().Add(c.sessionLifetime)
+
 	results, err := c.writeValues(ctx, items)
 	if err != nil {
 		return err
@@ -364,6 +416,15 @@ func (c *Client) fetchPublicKeys(ctx context.Context, t *tracker, kind SessionKi
 	}
 	for name, v := range values {
 		plant := owner[name]
+		cred := t.cred[plant]
+		if cred == nil {
+			// The step order guarantees a credential for every active plant.
+			// Report rather than dereference nil, so a future reordering of the
+			// procedure surfaces as a failed command and not as a panic in a
+			// library that moves turbines.
+			t.fail(plant, fmt.Errorf("energontrol: plant %d: no session credentials", plant))
+			continue
+		}
 		if v.Err != nil {
 			t.fail(plant, v.Err)
 			continue
@@ -372,7 +433,7 @@ func (c *Client) fetchPublicKeys(ctx context.Context, t *tracker, kind SessionKi
 			t.fail(plant, fmt.Errorf("energontrol: plant %d: %w", plant, ErrPublicKey))
 			continue
 		}
-		t.cred[plant].publicKey = v.Value
+		cred.publicKey = v.Value
 	}
 	return nil
 }
@@ -385,6 +446,10 @@ func (c *Client) writeParameters(ctx context.Context, t *tracker, p sessionProce
 	written := make(map[uint8][]string)
 	for _, plant := range t.active() {
 		cred := t.cred[plant]
+		if cred == nil {
+			t.fail(plant, fmt.Errorf("energontrol: plant %d: no session credentials", plant))
+			continue
+		}
 		pending := p.parameterItems(plant, t.cmd[plant], cred)
 		if len(pending) == 0 {
 			t.fail(plant, fmt.Errorf("energontrol: plant %d: nothing to write", plant))
@@ -429,6 +494,10 @@ func (c *Client) submitSessions(ctx context.Context, t *tracker, kind SessionKin
 	owner := make(map[string]uint8, len(plants))
 	for _, plant := range plants {
 		cred := t.cred[plant]
+		if cred == nil {
+			t.fail(plant, fmt.Errorf("energontrol: plant %d: no session credentials", plant))
+			continue
+		}
 		name := sessionSubmitItem(plant, kind)
 		owner[name] = plant
 		pub, err := longWord(cred.publicKey, "public key")
@@ -463,10 +532,22 @@ func (c *Client) submitSessions(ctx context.Context, t *tracker, kind SessionKin
 // client's. Without this check, a client that lost a race writes its command
 // into somebody else's session.
 //
-// A session id read back as zero means the server did not report one — this
-// package never draws zero — and is treated as "cannot verify" rather than as a
-// mismatch, so a server that does not expose the id logs a warning instead of
-// failing every command.
+// Exactly one outcome is tolerated: a session id read back as zero means the
+// server does not report the id at all, because this package never draws zero.
+// That is the absence of information about a working session, and it is logged.
+//
+// Everything else that prevents the check from being carried out — a faulted
+// item, a missing item, unusable quality, a stale value, a value of an
+// unexpected type — fails the plant with ErrSessionUnverified. Those are
+// statements about the item, not a missing server capability, and an
+// unverifiable session is not a verified one. Treating them as tolerable is
+// what let an earlier draft report OutcomeCommanded with Err == nil for a
+// session it had never confirmed, and with the default logger discarding
+// everything the caller had no way to find out.
+//
+// The session id being unverifiable does not stop the parameter check: both
+// results are collected, so a plant's error names every check that could not be
+// carried out rather than only the first.
 func (c *Client) verifySession(ctx context.Context, t *tracker, kind SessionKind, checkParameters bool) error {
 	plants := t.active()
 	if len(plants) == 0 {
@@ -490,9 +571,16 @@ func (c *Client) verifySession(ctx context.Context, t *tracker, kind SessionKind
 		got := values[sessionRequestItem(plant, kind)]
 		switch {
 		case got.Err != nil:
-			c.log.Warn("cannot read back the session id",
-				"plant", plant, "kind", string(kind), "err", got.Err)
+			if c.lenientVerification {
+				c.log.Warn("cannot read back the session id",
+					"plant", plant, "kind", string(kind), "err", got.Err)
+				break
+			}
+			t.fail(plant, fmt.Errorf("%w: plant %d: the session id could not be read back: %w",
+				ErrSessionUnverified, plant, got.Err))
+			continue
 		case len(got.Values) == 0 || got.Values[0] == 0:
+			// The one tolerated case: the server does not report the id.
 			c.log.Warn("server does not report the session id; reservation cannot be verified",
 				"plant", plant, "kind", string(kind))
 		case got.Values[0] != uint64(cred.sessionID):
@@ -506,24 +594,46 @@ func (c *Client) verifySession(ctx context.Context, t *tracker, kind SessionKind
 		if !checkParameters {
 			continue
 		}
-		for _, w := range t.written[plant] {
-			readBack := values[w.Name]
-			if readBack.Err != nil {
+		c.verifyParameters(t, plant, values)
+	}
+	return nil
+}
+
+// verifyParameters checks that every value written for one plant is the value
+// the session now holds, and fails the plant if any of them cannot be confirmed.
+func (c *Client) verifyParameters(t *tracker, plant uint8, values map[string]arrayValue) {
+	for _, w := range t.written[plant] {
+		readBack := values[w.Name]
+		if readBack.Err != nil {
+			if c.lenientVerification {
 				c.log.Warn("cannot read back a written value",
 					"plant", plant, "item", w.Name, "err", readBack.Err)
 				continue
 			}
-			if len(readBack.Values) == 0 || len(w.Value) == 0 {
+			t.fail(plant, fmt.Errorf("%w: plant %d: %s could not be read back: %w",
+				ErrSessionUnverified, plant, w.Name, readBack.Err))
+			return
+		}
+		if len(readBack.Values) == 0 {
+			if c.lenientVerification {
+				c.log.Warn("written value read back empty", "plant", plant, "item", w.Name)
 				continue
 			}
-			if readBack.Values[0] != uint64(w.Value[0]) {
-				t.fail(plant, fmt.Errorf("%w: %s holds %d, this client wrote %d",
-					ErrParameterNotAccepted, w.Name, readBack.Values[0], w.Value[0]))
-				break
-			}
+			t.fail(plant, fmt.Errorf("%w: plant %d: %s read back without a value",
+				ErrSessionUnverified, plant, w.Name))
+			return
+		}
+		if len(w.Value) == 0 {
+			// Cannot happen: every parameter item is written with three
+			// elements. Guard rather than index into an empty slice.
+			continue
+		}
+		if readBack.Values[0] != uint64(w.Value[0]) {
+			t.fail(plant, fmt.Errorf("%w: %s holds %d, this client wrote %d",
+				ErrParameterNotAccepted, w.Name, readBack.Values[0], w.Value[0]))
+			return
 		}
 	}
-	return nil
 }
 
 // releaseSessions accounts for every session that was reserved but not
@@ -569,8 +679,12 @@ func (c *Client) releaseSessions(ctx context.Context, t *tracker, kind SessionKi
 			t.fail(plant, ErrSessionLeftOpen)
 			continue
 		}
-		if state == SessionFree || state == SessionWaitEnd {
-			continue // nothing is holding the session
+		if state == SessionFree || state.satisfies(SessionWaitEnd) {
+			// The session ran its course: either it is already free, or it is
+			// winding down after a submit. It still answers "occupied" until
+			// the session end delay has passed — 360 s after a stop — but there
+			// is nothing left for this client to release or to report.
+			continue
 		}
 		if c.release != nil {
 			cred := t.cred[plant]

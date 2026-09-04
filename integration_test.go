@@ -132,15 +132,33 @@ func TestLivePlantState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlantCtrlState: %v", err)
 	}
+	// A reading call reports one entry per plant and puts the reason in Err for
+	// a plant whose state could not be established. Ctrl is meaningless then.
 	for _, s := range states {
-		t.Logf("plant %d: %s", s.PlantNo, s.Ctrl)
+		t.Logf("%s", s)
+	}
+	if err := states.Err(); err != nil {
+		t.Errorf("some plant states could not be read: %v", err)
 	}
 	rbh, err := env.client.PlantRbhState(ctx, env.plants...)
 	if err != nil {
 		t.Fatalf("PlantRbhState: %v", err)
 	}
 	for _, s := range rbh {
-		t.Logf("plant %d heating: %s", s.PlantNo, RbhStatusString(s.Status))
+		t.Logf("heating: %s", s)
+	}
+	if err := rbh.Err(); err != nil {
+		t.Errorf("some heating states could not be read: %v", err)
+	}
+	ice, err := env.client.PlantIceDetState(ctx, env.plants...)
+	if err != nil {
+		t.Fatalf("PlantIceDetState: %v", err)
+	}
+	for _, s := range ice {
+		t.Logf("ice detection: %s", s)
+	}
+	if err := ice.Err(); err != nil {
+		t.Errorf("some ice detection states could not be read: %v", err)
 	}
 }
 
@@ -152,10 +170,15 @@ func TestLiveStopThenStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the state before the test: %v", err)
 	}
+	// Only command plants whose state was established: restoring a plant whose
+	// state is unknown would be guessing at what to restore it to.
+	if err := before.Err(); err != nil {
+		t.Fatalf("the state of some plants could not be established: %v", err)
+	}
 	t.Cleanup(func() {
 		// Put every plant back the way it was found.
 		for _, s := range before {
-			if s.Ctrl != CtrlStart {
+			if s.Err != nil || s.Ctrl != CtrlStart {
 				continue
 			}
 			if _, err := env.client.Start(context.Background(), env.userID, s.PlantNo); err != nil {
@@ -193,13 +216,16 @@ func TestLiveRbhCycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the heating state: %v", err)
 	}
+	if err := before.Err(); err != nil {
+		t.Fatalf("the heating state of some plants could not be established: %v", err)
+	}
 	t.Cleanup(func() {
 		if _, err := env.client.RbhStandard(context.Background(), env.userID, env.plants...); err != nil {
 			t.Errorf("restoring the heating to standard: %v", err)
 		}
 	})
 	for _, s := range before {
-		t.Logf("plant %d heating before: %s", s.PlantNo, RbhStatusString(s.Status))
+		t.Logf("heating before: %s", s)
 	}
 	res, err := env.client.RbhOn(ctx, env.userID, env.plants...)
 	if err != nil {
@@ -222,6 +248,10 @@ func TestLiveReset(t *testing.T) {
 }
 
 // assertCtrlState waits for the SCADA to reflect a commanded state.
+//
+// This is the monitoring loop the package documentation prescribes: reaching
+// the end of a session is not evidence that the turbine moved, so the state has
+// to be polled until it reports what was asked for.
 func assertCtrlState(t *testing.T, env liveEnv, want CtrlValue) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
@@ -232,9 +262,11 @@ func assertCtrlState(t *testing.T, env liveEnv, want CtrlValue) {
 		}
 		all := true
 		for _, s := range states {
-			if s.Ctrl != want {
+			// A plant whose state is unknown has not reached the target state:
+			// unknown is never "yes".
+			if s.Err != nil || s.Ctrl != want {
 				all = false
-				t.Logf("plant %d is %s, waiting for %s", s.PlantNo, s.Ctrl, want)
+				t.Logf("%s, waiting for %s", s, want)
 			}
 		}
 		if all {

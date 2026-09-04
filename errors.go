@@ -3,6 +3,7 @@ package energontrol
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Sentinel errors. Every error returned by this package wraps one of these, so
@@ -20,9 +21,14 @@ var (
 	// ErrInvalidValue is returned when a Ctrl or Rbh value is outside the set of
 	// values a client is allowed to write.
 	ErrInvalidValue = errors.New("energontrol: value must not be written by a client")
-	// ErrNothingRequested is returned by ControlAndRbh when neither SetCtrlValue
-	// nor SetRbhValue is set.
-	ErrNothingRequested = errors.New("energontrol: neither a Ctrl nor an Rbh value was requested")
+	// ErrNothingRequested is returned by ControlAndRbh when none of
+	// SetCtrlValue, SetRbhValue and SetIceDetValue is set, so the command would
+	// write nothing at all.
+	ErrNothingRequested = errors.New("energontrol: no Ctrl, Rbh or IceDet value was requested")
+	// ErrInvalidUserID is returned when the user id does not fit into the long
+	// word Enercon defines for it. It is an argument error and is reported
+	// before anything is sent to the server.
+	ErrInvalidUserID = errors.New("energontrol: user id does not fit in a long word")
 
 	// ErrServerNotRunning is returned when the OPC server answers but reports a
 	// ServerState other than "running".
@@ -39,6 +45,11 @@ var (
 	// ErrStaleValue is returned when an item's timestamp is older than the
 	// configured maximum age. See WithMaxStateAge.
 	ErrStaleValue = errors.New("energontrol: item value is stale")
+	// ErrNoItemTime is returned when a maximum state age is configured but the
+	// server reports no timestamp for an item, so its age cannot be
+	// established. It wraps ErrStaleValue: an age that cannot be established is
+	// not an age within the limit.
+	ErrNoItemTime = fmt.Errorf("%w: the server reported no item timestamp", ErrStaleValue)
 	// ErrUnexpectedType is returned when an item's value cannot be interpreted as
 	// an unsigned integer.
 	ErrUnexpectedType = errors.New("energontrol: unexpected OPC value type")
@@ -74,6 +85,12 @@ var (
 	ErrSessionValue = errors.New("energontrol: server reported a value error")
 	// ErrPublicKey is returned when the session public key reads as zero.
 	ErrPublicKey = errors.New("energontrol: session public key is zero")
+	// ErrSessionExpired is returned when the session lifetime Enercon documents
+	// for control access to a single plant has run out before the procedure
+	// completed. The remaining steps cannot achieve anything and are not
+	// attempted. It wraps ErrSessionState so a caller that classifies session
+	// problems still catches it.
+	ErrSessionExpired = fmt.Errorf("%w: the control session lifetime has run out", ErrSessionState)
 
 	// ErrCtrlValueRejected is returned for plants whose Ctrl item reports 121,
 	// the feedback code Enercon uses for a rejected control value.
@@ -83,6 +100,17 @@ var (
 	// SessionRequest is not the one this client wrote. The session belongs to
 	// somebody else and must not be used.
 	ErrSessionIDMismatch = errors.New("energontrol: the reserved session belongs to another client")
+
+	// ErrSessionUnverified is returned when a check the Enercon session schema
+	// requires could not be carried out at all — the session id or a written
+	// value could not be read back, so neither ownership nor content of the
+	// session is established.
+	//
+	// It is deliberately distinct from ErrSessionIDMismatch, which states that
+	// the session provably belongs to somebody else, and from the one case that
+	// stays tolerated: a session id read back as zero means the server does not
+	// report the id, because this package never draws zero.
+	ErrSessionUnverified = errors.New("energontrol: the control session could not be verified")
 
 	// ErrParameterNotAccepted is returned when the value read back from a
 	// Set… item is not the value that was written, so submitting the session
@@ -156,10 +184,5 @@ func reasonText(err error) string {
 	if err == nil {
 		return "unknown reason"
 	}
-	const prefix = "energontrol: "
-	s := err.Error()
-	if len(s) > len(prefix) && s[:len(prefix)] == prefix {
-		return s[len(prefix):]
-	}
-	return s
+	return strings.TrimPrefix(err.Error(), "energontrol: ")
 }

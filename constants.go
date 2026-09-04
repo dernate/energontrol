@@ -308,6 +308,20 @@ var sessionNames = map[SessionState]string{
 	SessionInsufficientRights: "insufficient rights",
 }
 
+// satisfies reports whether an observed session state fulfils a wait for want.
+//
+// After a submit the session may pass through SessionWaitLoop (3, "waiting time
+// in loop mode") on its way to SessionWaitEnd (4). Reaching 3 already proves the
+// submit was accepted, because only a submit moves a session out of parameter
+// input, so it counts as the end of the procedure rather than as a failure to
+// reach state 4 in time.
+func (s SessionState) satisfies(want SessionState) bool {
+	if s == want {
+		return true
+	}
+	return want == SessionWaitEnd && s == SessionWaitLoop
+}
+
 func (s SessionState) String() string {
 	if name, ok := sessionNames[s]; ok {
 		return fmt.Sprintf("%q", name)

@@ -35,9 +35,13 @@
 //   - A plant that cannot be commanded yields OutcomeNotPermitted with a reason,
 //     not a quiet success. Plants stopped by Enercon with higher rights are the
 //     usual case.
-//   - Success is reported only for plants where a value was actually written and
-//     the session confirmed it. Reaching the final session state is not by
-//     itself evidence that anything was written.
+//   - Success is reported only for plants where a value was actually written,
+//     the server confirmed the write, and the session was verified. Reaching the
+//     final session state is not by itself evidence that anything was written.
+//   - A check that cannot be carried out is not a check that passed. If the
+//     session id or a written value cannot be read back, the plant fails with
+//     ErrSessionUnverified rather than being reported as commanded on the
+//     strength of a log warning nobody reads.
 //
 // # A command is not a confirmation that the plant moved
 //
@@ -55,9 +59,15 @@
 // single plant. They constrain how a caller may schedule commands:
 //
 //   - Session timeout: 60 s. A session that cannot be completed expires after
-//     this; there is no documented way to abort one earlier.
-//     The default polling budget for a state transition is one second, well
-//     inside this; raise it with WithSessionPolling if a SCADA needs longer.
+//     this; there is no documented way to abort one earlier. It is the ceiling
+//     on everything a command waits for: every wait inside a session is clamped
+//     to the time left of it, so the per-transition polling budget cannot add
+//     up past the point where the session still exists. A command that runs
+//     into it reports ErrSessionExpired. WithSessionLifetime overrides the
+//     value for an installation that documents a different one.
+//   - The default polling budget is one second per state transition — not per
+//     command, of which there are four. Raise it with WithSessionPolling if a
+//     SCADA needs longer; values above the session lifetime are clamped to it.
 //   - Extension timeout after setting a value: 60 s.
 //   - Delay before a new reservation after a stop: 360 s. A plant that was just
 //     stopped answers "occupied" for six minutes. Do not build a control loop
@@ -70,6 +80,25 @@
 // lock the plant out for three minutes, and a wrong user id for five. Errors
 // wrapping ErrInsufficientRights or ErrIncorrectUserID must not be retried.
 //
+// # Plant numbers
+//
+// A plant number is a uint8 throughout this package, and that is a deliberate
+// choice rather than a narrow type nobody thought about. An Enercon wind park
+// holds on the order of 20 to 30 turbines; 255 leaves an order of magnitude of
+// headroom over the largest park this package is meant to serve. The narrow
+// type keeps the plant number small enough to be a map key and a struct field
+// everywhere without conversions, and makes an accidental negative or absurd
+// value impossible to express.
+//
+// The limit is nevertheless never allowed to hide a turbine. If a browse of
+// Loc/Wec reports a plant node this package cannot address — a number above
+// 255, or a name that does not follow the Loc/Wec/Plant<n> scheme — it is
+// reported in TurbineInfo.Unsupported and logged, not dropped. A plant missing
+// from a park listing is never commanded and never monitored, so the caller has
+// to be able to see that it happened. If a park ever does exceed the range, that
+// shows up as an entry in Unsupported rather than as a turbine that quietly does
+// not exist.
+//
 // # Correlating responses
 //
 // Response items are matched to request items by ClientItemHandle, and by
@@ -80,11 +109,19 @@
 //
 // # Concurrency
 //
-// A Client is safe for concurrent use by multiple goroutines, as long as no two
-// goroutines command the same plant at the same time. The Enercon control
-// session is a single plant-wide resource; two overlapping sessions overwrite
-// each other's keys and the outcome is undefined. Serialise per plant, or route
-// all commands for a park through one goroutine.
+// A Client is safe for concurrent use by multiple goroutines. Commands are
+// serialised per plant inside the Client: the Enercon control session is a
+// single plant-wide resource, and two overlapping sessions overwrite each
+// other's keys. A command for a plant another goroutine is currently commanding
+// waits for it, in plant-number order, so overlapping plant sets cannot
+// deadlock. Read-only calls are never blocked.
+//
+// The serialisation is per Client and therefore covers callers that share one,
+// which is how a Client is meant to be used — it owns one park. It cannot cover
+// a second process. There the session id check is the only defence, and its
+// reach is limited: the id is drawn from 1 to 19, so two clients competing for
+// one plant draw the same id about once in nineteen attempts. Commands for one
+// park belong in one process.
 //
 // # Verifying the session
 //
@@ -95,9 +132,21 @@
 // written value back before submitting, so a session is only ever submitted when
 // it is this client's and holds the requested command.
 //
-// A server that does not report the session id at all is tolerated: the id is
-// never drawn as zero, so a zero read-back is treated as "cannot verify" and
-// logged, not as a mismatch.
+// Exactly one outcome is tolerated: a server that does not report the session id
+// at all. The id is never drawn as zero, so a zero read-back means "the server
+// does not expose it" and is logged rather than treated as a mismatch.
+//
+// Everything else that prevents a check from being carried out — a faulted item,
+// a missing item, unusable quality, a stale value, an unexpected type — fails
+// the plant with ErrSessionUnverified. An unverifiable session is not a verified
+// one, and a package whose default logger discards everything cannot report such
+// a gap through a warning. WithLenientVerification restores the tolerant
+// behaviour for a server that genuinely cannot answer these reads.
+//
+// The same rule covers the write itself: an item missing from the WriteResponse
+// is unconfirmed, and an unconfirmed write is not a write. This matters most for
+// Reset, which the data sheet gives no readable parameter for, so the write
+// confirmation is its only evidence.
 //
 // # Sessions that cannot be completed
 //
@@ -117,6 +166,12 @@
 //	}
 //	if errors.Is(err, energontrol.ErrInsufficientRights) {
 //	    // the user id lacks the rights; retrying will not help
+//	}
+//	if errors.Is(err, energontrol.ErrSessionUnverified) {
+//	    // the command was not sent because the session could not be checked
+//	}
+//	if errors.Is(err, energontrol.ErrSessionExpired) {
+//	    // the session ran out of its 60 s; a fresh attempt can work
 //	}
 //
 // # Relationship to v1
@@ -140,9 +195,18 @@
 // value answers with CtrlValueRejected, surfacing as ErrCtrlValueRejected.
 //
 // One deviation from the data sheet is deliberate: it lists 8 as a SetRbH value
-// ("switch heating on manually"), but the server rejects a bare 8. The heating is
-// switched on with 10, that is 8+2, so no constant for 8 exists. Enercon notes about the
-// session mechanism: "this mechanism only serves to regulate and identify access
-// by trusted communication partners. It is not a security mechanism such as VPN
-// or SSL encryption." Protect the network path accordingly.
+// ("switch heating on manually"), but the server rejects a bare 8. The heating
+// is switched on with 10, that is 8+2, so no constant for 8 exists.
+//
+// # Transport security
+//
+// Enercon notes about the session mechanism: "this mechanism only serves to
+// regulate and identify access by trusted communication partners. It is not a
+// security mechanism such as VPN or SSL encryption."
+//
+// The session id and the keys are therefore not credentials, and OPC XML-DA over
+// plain HTTP carries the user id in clear text. Anyone who can reach the SCADA
+// endpoint can command the park. Put the endpoint behind a VPN or TLS and
+// restrict who can route to it; this package cannot make that decision for a
+// caller, and does not pretend the session mechanism substitutes for it.
 package energontrol

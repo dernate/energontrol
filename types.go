@@ -1,6 +1,9 @@
 package energontrol
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Outcome describes what happened to a single plant. It exists because a bool
 // cannot distinguish "I sent the command" from "no command was needed" from
@@ -79,7 +82,7 @@ func (rs Results) Err() error {
 			errs = append(errs, fmt.Errorf("plant %d: %w", r.PlantNo, r.Err))
 		}
 	}
-	return joinErrors(errs)
+	return errors.Join(errs...)
 }
 
 // InRequestedState reports whether every plant reached the requested state.
@@ -93,24 +96,127 @@ func (rs Results) InRequestedState() bool {
 }
 
 // PlantState is the control state of one plant.
+//
+// Err is non-nil when the state of this plant could not be established. Ctrl is
+// then meaningless and must not be used as a process value — Ctrl 0 means
+// "running", which is the last thing an unknown state should be read as. One
+// unreadable plant does not invalidate the others, so a reading call returns
+// one entry per requested plant and reports the failures here.
 type PlantState struct {
 	PlantNo uint8
 	Ctrl    CtrlValue
+	Err     error
+}
+
+func (s PlantState) String() string {
+	if s.Err != nil {
+		return fmt.Sprintf("plant %d: unknown: %v", s.PlantNo, s.Err)
+	}
+	return fmt.Sprintf("plant %d: %s", s.PlantNo, s.Ctrl)
 }
 
 // RbhState is the rotor blade heating status word of one plant. Decode it with
 // RbhStatusStrings.
+//
+// Err is non-nil when the status of this plant could not be read; Status is then
+// meaningless.
 type RbhState struct {
 	PlantNo uint8
 	Status  uint64
+	Err     error
+}
+
+func (s RbhState) String() string {
+	if s.Err != nil {
+		return fmt.Sprintf("plant %d: unknown: %v", s.PlantNo, s.Err)
+	}
+	return fmt.Sprintf("plant %d: %s", s.PlantNo, RbhStatusString(s.Status))
 }
 
 // IceDetState is the ice detection status word of one plant. It says which
 // system detected ice. Decode it with IceDetStatusStrings.
+//
+// Err is non-nil when the status of this plant could not be read; Status is then
+// meaningless.
 type IceDetState struct {
 	PlantNo uint8
 	Status  uint64
+	Err     error
 }
+
+func (s IceDetState) String() string {
+	if s.Err != nil {
+		return fmt.Sprintf("plant %d: unknown: %v", s.PlantNo, s.Err)
+	}
+	return fmt.Sprintf("plant %d: %s", s.PlantNo, IceDetStatusString(s.Status))
+}
+
+// plantScoped is what the per-plant state types have in common: each one knows
+// which plant it describes and whether that plant could be read.
+type plantScoped interface {
+	plant() uint8
+	err() error
+}
+
+func (s PlantState) plant() uint8  { return s.PlantNo }
+func (s PlantState) err() error    { return s.Err }
+func (s RbhState) plant() uint8    { return s.PlantNo }
+func (s RbhState) err() error      { return s.Err }
+func (s IceDetState) plant() uint8 { return s.PlantNo }
+func (s IceDetState) err() error   { return s.Err }
+
+// statesErr joins the per-plant errors of a state slice into one error.
+func statesErr[T plantScoped](states []T) error {
+	var errs []error
+	for _, s := range states {
+		if err := s.err(); err != nil {
+			errs = append(errs, fmt.Errorf("plant %d: %w", s.plant(), err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// statesGet returns the entry for one plant, and whether it was requested.
+func statesGet[T plantScoped](states []T, plant uint8) (T, bool) {
+	for _, s := range states {
+		if s.plant() == plant {
+			return s, true
+		}
+	}
+	var zero T
+	return zero, false
+}
+
+// PlantStates is the result of reading the control state of several plants.
+type PlantStates []PlantState
+
+// Err returns a single error joining every plant whose state could not be
+// established, or nil if every state was read. Use it where an unreadable plant
+// should fail the whole call — it is the all-or-nothing answer these calls used
+// to give unconditionally.
+func (ss PlantStates) Err() error { return statesErr(ss) }
+
+// Get returns the entry for one plant, and whether it was part of the request.
+func (ss PlantStates) Get(plant uint8) (PlantState, bool) { return statesGet(ss, plant) }
+
+// RbhStates is the result of reading the heating status of several plants.
+type RbhStates []RbhState
+
+// Err returns a single error joining every plant whose status could not be read.
+func (ss RbhStates) Err() error { return statesErr(ss) }
+
+// Get returns the entry for one plant, and whether it was part of the request.
+func (ss RbhStates) Get(plant uint8) (RbhState, bool) { return statesGet(ss, plant) }
+
+// IceDetStates is the result of reading the ice detection status of several
+// plants.
+type IceDetStates []IceDetState
+
+// Err returns a single error joining every plant whose status could not be read.
+func (ss IceDetStates) Err() error { return statesErr(ss) }
+
+// Get returns the entry for one plant, and whether it was part of the request.
+func (ss IceDetStates) Get(plant uint8) (IceDetState, bool) { return statesGet(ss, plant) }
 
 // ControlAndRbhValue describes a command that combines a control value, a
 // heating value and an ice warning lamp value. Enercon transmits them in one
@@ -147,4 +253,18 @@ type TurbineInfo struct {
 	Reset   map[uint8]bool
 	Para    map[uint8]bool
 	IceDet  map[uint8]bool
+
+	// Unsupported lists the item names below Loc/Wec that look like a plant but
+	// could not be taken into PlantNo — a number above 255, which the uint8
+	// plant number cannot represent, or a name that does not follow the
+	// Loc/Wec/Plant<n> scheme.
+	//
+	// It exists so a plant can never disappear from a park listing without a
+	// trace: a plant that is not in PlantNo is never commanded and never
+	// monitored, and a caller has to be able to see that this happened. In
+	// practice it stays empty — an Enercon park holds 20 to 30 turbines, well
+	// inside the range (see the package documentation on plant numbers) — which
+	// is exactly why the case needs reporting rather than trust: nobody would
+	// notice a silent drop in a situation nobody expects.
+	Unsupported []string
 }

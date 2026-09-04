@@ -83,6 +83,15 @@ setpoint was reached — it is true for the first two outcomes only.
 `Results.InRequestedState()` and `Results.Err()` answer the same questions for a
 whole batch.
 
+The reading calls follow the same shape. `PlantCtrlState`, `PlantRbhState` and
+`PlantIceDetState` return one entry per requested plant, and a plant whose state
+could not be established carries the reason in its `Err` — its `Ctrl` or `Status`
+is then meaningless, since `Ctrl` 0 means *running*. The returned `error` is
+reserved for failures of the whole request. One unreadable turbine does not blind
+a caller to the rest of the park, which matters because this is the call the
+monitoring loop below is built on. `PlantStates.Err()` gives the all-or-nothing
+answer where that is what a caller wants.
+
 ### What is deliberately *not* a success
 
 - A plant Enercon stopped with higher rights (`CtrlStop60Enercon`,
@@ -104,14 +113,14 @@ standing still, which is what was asked for. A forced `Stop` does not.
 | `Start(ctx, userID, plants...)` | Run the plants. |
 | `Stop(ctx, userID, fullStop, forceExplicitCommand, plants...)` | Stop at 90° (`fullStop`) or 60°. With `forceExplicitCommand` the plant must reach exactly that stop state; without it, any stop state satisfies the request. |
 | `SetCtrl(ctx, userID, value, forceExplicitCommand, plants...)` | Send any documented control value, including the gradient stops and the stops for ice detection, shadow flicker and species protection. |
-| `SetRbh(ctx, userID, value, plants...)` | Send any documented heating value, including `RbhSetHeatOn` and `RbhSetPresetDuration`. |
+| `SetRbh(ctx, userID, value, plants...)` | Send any documented heating value, including `RbhSetPresetDuration`, which the named methods do not cover. |
 | `IceDetOn` / `IceDetOff` / `SetIceDet(ctx, userID, value, plants...)` | Switch the ice warning lamp. |
 | `Reset(ctx, userID, plants...)` | Acknowledge faults. |
 | `RbhOn` / `RbhAutoOff` / `RbhStandard` | Rotor blade heating: manually on, automatic suppressed, back to automatic. |
 | `ControlAndRbh(ctx, userID, values, plants...)` | A control and a heating value in one session. |
 | `Turbines(ctx)` | List the plants of the park and which functions each offers. |
 | `ParkNo(ctx)` / `ParkNoMatch(ctx, parkNo, checkAvailable)` | Read or verify the park number. |
-| `PlantCtrlState` / `PlantRbhState` / `PlantIceDetState` `(ctx, plants...)` | Read states without commanding anything. |
+| `PlantCtrlState` / `PlantRbhState` / `PlantIceDetState` `(ctx, plants...)` | Read states without commanding anything. One entry per plant; a plant that could not be read carries the reason in its `Err`. |
 | `ServerAvailable(ctx)` | Returns an error unless the server is reachable **and** running. |
 
 ```go
@@ -237,8 +246,10 @@ client := energontrol.New(server,
 | Option | Effect |
 | --- | --- |
 | `WithLogger` | Attach an `*slog.Logger`. By default the package logs nothing. |
-| `WithSessionPolling` | How often and how long to wait for a session state transition. Default 100 ms over 1 s; raise the timeout for a slower SCADA. |
-| `WithMaxStateAge` | Reject plant states older than this with `ErrStaleValue`. **Off by default** — it depends on the server returning item timestamps and on both clocks agreeing. Enabling it with a value well above the SCADA's update cycle is recommended in production. |
+| `WithSessionPolling` | How often and how long to wait for **one** session state transition — a command waits for four. Default 100 ms over 1 s; raise the timeout for a slower SCADA. Values above the session lifetime are clamped to it. |
+| `WithMaxStateAge` | Reject item values older than this with `ErrStaleValue`. **Off by default** — it depends on the server returning item timestamps and on both clocks agreeing. Enabling it with a value well above the SCADA's update cycle is recommended in production. The check is strict: an item with no timestamp is rejected with `ErrNoItemTime`, because an age that cannot be established is not an age within the limit. |
+| `WithSessionLifetime` | Override the 60 s session lifetime that bounds every wait inside a command. Only for an installation whose documentation states a different value. |
+| `WithLenientVerification` | Accept a written item the server did not confirm, and a session that could not be read back. Gives up evidence; see *Session verification*. |
 | `WithSessionRelease` | Close sessions that were reserved but could not be completed. |
 
 ### Sessions that cannot be completed
@@ -260,8 +271,8 @@ single plant. They constrain how commands may be scheduled:
 
 | | |
 | --- | --- |
-| Session timeout | 60 s |
-| Default polling budget per state transition (`WithSessionPolling`) | 1 s |
+| Session timeout (enforced: bounds every wait, then `ErrSessionExpired`) | 60 s |
+| Default polling budget **per state transition** (`WithSessionPolling`) | 1 s |
 | Extension timeout after setting a value | 60 s |
 | Delay before a new reservation **after a stop** | 360 s |
 | Delay before a new reservation after a start | 0 s |
@@ -292,21 +303,70 @@ submitting, so a session is submitted only when it is this client's *and* holds
 the requested command. A mismatch yields `ErrSessionIDMismatch`; a value that did
 not arrive yields `ErrParameterNotAccepted`.
 
-A server that does not report the session id is tolerated: the id is never drawn
-as zero, so a zero read-back is logged as "cannot verify" rather than treated as
-a mismatch.
+**A check that could not be carried out is not a check that passed.** If the
+session id or a written value cannot be read back — a faulted item, a missing
+item, bad quality, a stale value — the plant fails with `ErrSessionUnverified`
+and nothing is submitted. The same holds for the write itself: an item missing
+from the `WriteResponse` is unconfirmed, and an unconfirmed write is not a write.
+That is the only evidence a `Reset` has, since the data sheet defines no
+readable parameter for it.
+
+Exactly one case stays tolerated: a server that does not report the session id at
+all. The id is never drawn as zero, so a zero read-back is logged as "cannot
+verify" rather than treated as a mismatch.
+
+`WithLenientVerification` restores the tolerant behaviour for a server that
+genuinely cannot answer these reads. It gives up real evidence — turn it on only
+for an installation where the strict behaviour has been shown to reject writes
+the server did carry out.
+
+> The session id space holds 19 values, so two clients competing for one plant
+> draw the same id about once in nineteen attempts, and the ownership check then
+> confirms the other client's reservation. The check narrows the race; it does
+> not close it. Commands for one park belong in one process.
+
+### Transport security
 
 > Enercon on the session mechanism: *"this mechanism only serves to regulate and
 > identify access by trusted communication partners. It is not a security
-> mechanism such as VPN or SSL encryption."* Protect the network path
-> accordingly.
+> mechanism such as VPN or SSL encryption."*
+
+The session id and the keys are not credentials, and OPC XML-DA over plain HTTP
+carries the user id in clear text. Anyone who can reach the SCADA endpoint can
+command the park. Put the endpoint behind a VPN or TLS and restrict who can route
+to it — this package cannot make that decision for you, and the session
+mechanism is not a substitute for it.
+
+The `ServerState` that every read and write response carries **is** checked, not
+just the one `GetStatus` reports before a command: a server that degrades to
+`failed` or `suspended` mid-session stops receiving commands, and its values stop
+being used as process values.
+
+## Plant numbers
+
+A plant number is a `uint8` throughout, deliberately. An Enercon park holds 20 to
+30 turbines, so 255 is an order of magnitude of headroom, and the narrow type
+keeps the number usable as a map key and struct field everywhere without
+conversions.
+
+The limit is not allowed to hide a turbine, though: a plant node under `Loc/Wec`
+that this package cannot address — a number above 255, or a name outside the
+`Loc/Wec/Plant<n>` scheme — is reported in `TurbineInfo.Unsupported` and logged,
+never dropped. A plant missing from a park listing is never commanded and never
+monitored, so that has to be visible.
 
 ## Concurrency
 
-A `Client` is safe for concurrent use — as long as **no two goroutines command
-the same plant at the same time**. The control session is a single plant-wide
-resource; overlapping sessions overwrite each other's keys. Serialise per plant,
-or route all commands for a park through one goroutine.
+A `Client` is safe for concurrent use. Commands are **serialised per plant**
+inside the `Client`: the control session is a single plant-wide resource, and
+overlapping sessions overwrite each other's keys. A command for a plant another
+goroutine is currently commanding waits for it, in plant-number order, so
+overlapping plant sets cannot deadlock. Read-only calls are never blocked.
+
+The serialisation is per `Client`, which covers callers that share one — the
+intended use, since a `Client` owns one park. It cannot cover a second process;
+there the session id check is the only defence, and its reach is limited (see
+*Session verification*). Route commands for one park through one process.
 
 ## Tests
 
@@ -318,8 +378,10 @@ go test -race ./...
 The protocol tests run against an in-memory OPC server (`fake_opc_test.go`) that
 models the session state machine and can inject the failures a real SCADA
 produces: unexpected value types, faulted items, bad quality, missing items,
-reordered responses, occupied and stuck sessions, a session reserved by another
-client, and a value that does not read back.
+reordered responses, occupied and stuck sessions, sessions in loop mode, a
+session reserved by another client, a value that does not read back, a write the
+server does not confirm, a server that degrades mid-command, and a transport
+that breaks in any single phase of the procedure.
 
 `spec_test.go` reconciles the implementation with the ENERCON SCADA PDI-OPC
 technical data sheet: the value sets, the item names, the array layouts, the

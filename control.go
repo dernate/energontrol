@@ -3,14 +3,23 @@ package energontrol
 import (
 	"context"
 	"fmt"
+	"math"
 )
 
 // PlantCtrlState reads the control state of the given plants.
 //
-// It fails if any plant's state cannot be established — a missing item, a
-// faulted item or an item whose quality is not good all mean the state of that
-// plant is unknown, and an unknown state must not be mistaken for "running".
-func (c *Client) PlantCtrlState(ctx context.Context, plants ...uint8) ([]PlantState, error) {
+// It returns one entry per requested plant, in request order. A plant whose
+// state could not be established carries that reason in its Err and its Ctrl
+// must not be used: a missing item, a faulted item, an item whose quality is not
+// good and a stale item all mean the state of that plant is unknown, and an
+// unknown state must not be mistaken for "running".
+//
+// The returned error is reserved for failures of the whole request — transport,
+// a server that is not running, a response that cannot be correlated. One
+// unreadable plant does not blind the caller to the others: this call is the
+// documented way to monitor a park, and a park is exactly what would be lost.
+// Use PlantStates.Err to fail on any unreadable plant.
+func (c *Client) PlantCtrlState(ctx context.Context, plants ...uint8) (PlantStates, error) {
 	if err := validatePlants(plants); err != nil {
 		return nil, err
 	}
@@ -18,19 +27,19 @@ func (c *Client) PlantCtrlState(ctx context.Context, plants ...uint8) ([]PlantSt
 	if err != nil {
 		return nil, err
 	}
-	out := make([]PlantState, 0, len(plants))
+	out := make(PlantStates, 0, len(plants))
 	for _, p := range plants {
-		if e := readErrs[p]; e != nil {
-			return nil, e
-		}
-		out = append(out, PlantState{PlantNo: p, Ctrl: states[p]})
+		out = append(out, PlantState{PlantNo: p, Ctrl: states[p], Err: readErrs[p]})
 	}
 	return out, nil
 }
 
 // PlantIceDetState reads the ice detection status of the given plants. Decode a
 // status word with IceDetStatusStrings.
-func (c *Client) PlantIceDetState(ctx context.Context, plants ...uint8) ([]IceDetState, error) {
+//
+// Like PlantCtrlState it returns one entry per requested plant and reports a
+// plant that could not be read in that entry's Err.
+func (c *Client) PlantIceDetState(ctx context.Context, plants ...uint8) (IceDetStates, error) {
 	if err := validatePlants(plants); err != nil {
 		return nil, err
 	}
@@ -38,19 +47,19 @@ func (c *Client) PlantIceDetState(ctx context.Context, plants ...uint8) ([]IceDe
 	if err != nil {
 		return nil, err
 	}
-	out := make([]IceDetState, 0, len(plants))
+	out := make(IceDetStates, 0, len(plants))
 	for _, p := range plants {
-		if e := readErrs[p]; e != nil {
-			return nil, e
-		}
-		out = append(out, IceDetState{PlantNo: p, Status: states[p]})
+		out = append(out, IceDetState{PlantNo: p, Status: states[p], Err: readErrs[p]})
 	}
 	return out, nil
 }
 
 // PlantRbhState reads the rotor blade heating status word of the given plants.
 // Decode a status word with RbhStatusStrings.
-func (c *Client) PlantRbhState(ctx context.Context, plants ...uint8) ([]RbhState, error) {
+//
+// Like PlantCtrlState it returns one entry per requested plant and reports a
+// plant that could not be read in that entry's Err.
+func (c *Client) PlantRbhState(ctx context.Context, plants ...uint8) (RbhStates, error) {
 	if err := validatePlants(plants); err != nil {
 		return nil, err
 	}
@@ -58,12 +67,9 @@ func (c *Client) PlantRbhState(ctx context.Context, plants ...uint8) ([]RbhState
 	if err != nil {
 		return nil, err
 	}
-	out := make([]RbhState, 0, len(plants))
+	out := make(RbhStates, 0, len(plants))
 	for _, p := range plants {
-		if e := readErrs[p]; e != nil {
-			return nil, e
-		}
-		out = append(out, RbhState{PlantNo: p, Status: states[p]})
+		out = append(out, RbhState{PlantNo: p, Status: states[p], Err: readErrs[p]})
 	}
 	return out, nil
 }
@@ -161,9 +167,17 @@ func (c *Client) setCtrl(ctx context.Context, userID uint64, want CtrlValue, for
 	if err := validatePlants(plants); err != nil {
 		return nil, err
 	}
+	if err := validateUserID(userID); err != nil {
+		return nil, err
+	}
 	if !want.Writable() {
 		return nil, fmt.Errorf("%w: Ctrl value %s", ErrInvalidValue, want)
 	}
+	unlock, err := c.lockPlants(ctx, plants)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := c.ServerAvailable(ctx); err != nil {
 		return nil, err
 	}
@@ -261,9 +275,17 @@ func (c *Client) setRbh(ctx context.Context, userID uint64, want RbhValue, plant
 	if err := validatePlants(plants); err != nil {
 		return nil, err
 	}
+	if err := validateUserID(userID); err != nil {
+		return nil, err
+	}
 	if !want.Writable() {
 		return nil, fmt.Errorf("%w: Rbh value %s", ErrInvalidValue, want)
 	}
+	unlock, err := c.lockPlants(ctx, plants)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := c.ServerAvailable(ctx); err != nil {
 		return nil, err
 	}
@@ -357,9 +379,17 @@ func (c *Client) setIceDet(ctx context.Context, userID uint64, want IceDetValue,
 	if err := validatePlants(plants); err != nil {
 		return nil, err
 	}
+	if err := validateUserID(userID); err != nil {
+		return nil, err
+	}
 	if !want.Writable() {
 		return nil, fmt.Errorf("%w: IceDet value %s", ErrInvalidValue, want)
 	}
+	unlock, err := c.lockPlants(ctx, plants)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := c.ServerAvailable(ctx); err != nil {
 		return nil, err
 	}
@@ -406,6 +436,9 @@ func (c *Client) ControlAndRbh(ctx context.Context, userID uint64, values Contro
 	if err := validatePlants(plants); err != nil {
 		return nil, err
 	}
+	if err := validateUserID(userID); err != nil {
+		return nil, err
+	}
 	if !values.SetCtrlValue && !values.SetRbhValue && !values.SetIceDetValue {
 		return nil, ErrNothingRequested
 	}
@@ -418,6 +451,11 @@ func (c *Client) ControlAndRbh(ctx context.Context, userID uint64, values Contro
 	if values.SetIceDetValue && !values.IceDetValue.Writable() {
 		return nil, fmt.Errorf("%w: IceDet value %s", ErrInvalidValue, values.IceDetValue)
 	}
+	unlock, lockErr := c.lockPlants(ctx, plants)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
 	if err := c.ServerAvailable(ctx); err != nil {
 		return nil, err
 	}
@@ -458,11 +496,12 @@ func (c *Client) ControlAndRbh(ctx context.Context, userID uint64, values Contro
 		var notPermitted error
 		if values.SetCtrlValue {
 			current := ctrlStates[p]
+			stateErr := current.stateError()
 			switch {
 			case ctrlSatisfied(current, values.CtrlValue, values.ForceExplicitCommand):
 				// nothing to do for the Ctrl part
-			case current.stateError() != nil:
-				notPermitted = current.stateError()
+			case stateErr != nil:
+				notPermitted = stateErr
 			default:
 				cmd.SetCtrl = true
 				cmd.CtrlValue = values.CtrlValue
@@ -470,9 +509,10 @@ func (c *Client) ControlAndRbh(ctx context.Context, userID uint64, values Contro
 		}
 		if notPermitted == nil && values.SetRbhValue {
 			status := rbhStates[p]
+			rbhErr := rbhStateError(status)
 			switch {
-			case rbhStateError(status) != nil:
-				notPermitted = rbhStateError(status)
+			case rbhErr != nil:
+				notPermitted = rbhErr
 			case rbhSatisfied(status, values.RbhValue):
 				// nothing to do for the Rbh part
 			default:
@@ -507,6 +547,14 @@ func (c *Client) Reset(ctx context.Context, userID uint64, plants ...uint8) (Res
 	if err := validatePlants(plants); err != nil {
 		return nil, err
 	}
+	if err := validateUserID(userID); err != nil {
+		return nil, err
+	}
+	unlock, err := c.lockPlants(ctx, plants)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := c.ServerAvailable(ctx); err != nil {
 		return nil, err
 	}
@@ -552,6 +600,22 @@ func (r *resultSet) list() Results {
 		out = append(out, res)
 	}
 	return out
+}
+
+// validateUserID rejects a user id that does not fit into the long word Enercon
+// defines for it.
+//
+// It is checked at every public entry point, before anything is sent: the id is
+// a property of the call, identical for every plant, so a value out of range is
+// an argument error and not a per-plant failure. Reporting it as one — which an
+// earlier draft did, after three reads had already gone to the SCADA — hid a
+// configuration mistake inside a plant result that a caller checking err would
+// never see.
+func validateUserID(userID uint64) error {
+	if userID > math.MaxUint32 {
+		return fmt.Errorf("%w: %d", ErrInvalidUserID, userID)
+	}
+	return nil
 }
 
 // validatePlants rejects an empty list and duplicates. Two entries for one plant

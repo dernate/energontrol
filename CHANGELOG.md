@@ -1,6 +1,150 @@
 # Changelog
 
-## v2.0.0
+## v2.0.0 (unreleased)
+
+### Hardening after the pre-release audit
+
+An independent architecture and code audit was run on the v2 candidate before
+release. It found that the safety contract v2 states in its own documentation
+was not upheld on several paths, in the same class as the v1 defects v2 was
+written to remove: reporting success without the evidence for it. Each item
+below was reproduced with a test before it was changed, and each test is in the
+suite.
+
+**An unconfirmed write counted as a write.** `writeValues` mapped an item
+missing from the `WriteResponse` to "accepted" — the exact inverse of the rule
+reads follow. `Reset` has no second line of defence, because the data sheet
+defines no readable parameter for `SetReset`, so the write confirmation is its
+only evidence: a `Reset` whose item the server never echoed was reported as
+`OutcomeCommanded`. A missing item is now `ErrItemMissing`, and
+`WithLenientVerification` restores the old behaviour for a server that genuinely
+does not echo written items.
+
+**Verification degraded silently to a log warning.** If the session id or a
+written value could not be read back — a faulted item, a missing item, bad
+quality, an unexpected type — `verifySession` logged a warning and carried on,
+and the plant came back as `OutcomeCommanded` with `Err == nil`. Since the
+default logger discards everything, a caller had no way to learn that the check
+the documentation promises had not happened. A check that cannot be carried out
+now fails the plant with `ErrSessionUnverified`. Exactly one case stays
+tolerated, and it is the one that was ever meant to be: a session id read back as
+zero, which means the server does not report it, because this package never
+draws zero. A one-element array typed as a bare scalar is now accepted as a
+valid read-back, so a server's encoding choice does not turn into an
+unverifiable session.
+
+**The polling budget did not bound the session.** `WithSessionPolling` set a
+budget per state transition, and a command waits for four of them, with nothing
+bounding the whole. The documentation advised keeping the timeout "below 60 s",
+which invited exactly the failure it was meant to prevent: at 55 s a command
+could run for over three minutes, writing `SetCtrl` and `SessionSubmit` into a
+session the server had dropped after 60 s. The session lifetime is now a first
+class notion: it starts with the reservation, every wait inside a session is
+clamped to what is left of it, the remaining steps are not attempted once it has
+run out, and the plant reports `ErrSessionExpired` — joined with the observed
+`SessionStateError`, so both the cause and the state stay visible. A polling
+timeout above the lifetime is clamped to it, and `WithSessionLifetime` overrides
+the value for an installation that documents a different one.
+
+**The `ServerState` of read and write responses was ignored.** OPC XML-DA carries
+`ServerState` in the reply base of *every* response; the package checked it only
+once per command, via `GetStatus`. That is a time-of-check to time-of-use test
+across several requests: a server that degraded to `failed` mid-session kept
+receiving control commands and kept having its values used as process values.
+Every read and write response is now checked, and an empty state stays tolerated
+because not every server fills the attribute. This also closes
+`ParkNoMatch(ctx, parkNo, false)` reporting a positive park match from a
+suspended server — which is how the live tests guard themselves.
+
+**`WithMaxStateAge` failed open.** The check was skipped for an item without a
+timestamp, which switched the caller's explicit freshness requirement off
+precisely on the servers it guards against: one that answers from a cache is
+more likely, not less, to be one that does not fill `ItemTime`. A missing
+timestamp is now `ErrNoItemTime`, which wraps `ErrStaleValue` so existing
+classification still works.
+
+**One unreadable plant blinded the caller to the whole park.** `PlantCtrlState`,
+`PlantRbhState` and `PlantIceDetState` returned `nil` and the first plant's error,
+throwing away the per-plant errors the layer below had carefully separated. That
+is the call the package's own documentation prescribes for monitoring a command,
+so a single unknown item name made a park invisible at the moment its states were
+needed most. They now return one entry per requested plant with the reason in
+that entry's `Err`; the returned `error` is reserved for failures of the whole
+request. `PlantStates.Err()` gives the all-or-nothing answer for callers who want
+it.
+
+**The user id was validated too late, per plant, with the wrong sentinel.** An id
+that does not fit in a long word was rejected inside `requestSessions`, after
+three reads had gone to the SCADA, as a per-plant `OutcomeFailed` with
+`err == nil` at the call level, wrapping `ErrInvalidValue` ("value must not be
+written by a client"). It is an argument error: it is now checked at every public
+entry point before anything is sent, and wraps the new `ErrInvalidUserID`.
+
+**The documented concurrency invariant was not enforced.** "No two goroutines may
+command the same plant" appeared in three documentation sections and nowhere in
+the code, although `validatePlants` rejects the same collision *within* one call
+for the same stated reason. Commands are now serialised per plant inside the
+`Client`, acquired in plant-number order so overlapping plant sets cannot
+deadlock, cancellable through the context, and never applied to read-only calls.
+
+**`SessionWaitLoop` (3) was treated as a failure.** The state is declared and
+named but was never used: `waitState` accepted only `SessionWaitEnd`. Reaching 3
+already proves the submit was accepted, because only a submit moves a session out
+of parameter input, so it now counts as the end of the procedure.
+
+**Plants the package cannot address disappeared silently.** `filterPlants`
+dropped a `Loc/Wec/Plant<n>` node whose number does not fit a `uint8`, and any
+plant-shaped node that does not match the scheme, without a trace — and a plant
+missing from `Turbines` is never commanded and never monitored. They are now
+reported in `TurbineInfo.Unsupported` and logged. The plant list is sorted, so
+two runs against one park compare equal.
+
+**`Turbines` returned a half-filled park next to an error** and issued up to
+three sequential browses per plant — over a hundred round trips for a park of
+forty. It is now all or nothing (a caller who overlooked the error would read
+"not listed" as "has no Ctrl"), and the per-plant browses run six at a time.
+
+**Test gaps.** `discovery.go` and `api.go` had no unit test at all, and the
+`ReadErr`/`WriteErr` knobs the fake already provided were never set by any test,
+so no transport-failure path was covered. Added: `discovery_test.go`,
+`api_test.go`, `transport_test.go` (a failure in each phase of the procedure,
+including the one that leaves a session reserved), and `hardening_test.go` for
+every item above. A GitHub Actions workflow now runs `go vet`, `gofmt`,
+`staticcheck` and `go test -race` with a coverage floor.
+
+**Documentation drift.** `README.md` referred to a constant `RbhSetHeatOn` that
+does not exist; `ErrNothingRequested` documented two of the three values it
+checks; the comment on `ctxErr` claimed the context is checked before every
+request; `releaseSessions` described a session in `SessionWaitEnd` as "nothing is
+holding the session" although the plant answers occupied for another 360 s; the
+`doc.go` note on `SetRbH` value 8 ran into the Enercon security quote without a
+break. All corrected, and the transport-security consequence is now stated
+outright: the session mechanism is not a credential, plain HTTP carries the user
+id in clear, so the endpoint belongs behind a VPN or TLS.
+
+**Smaller items.** `joinErrors` was an alias for `errors.Join` and is gone;
+`reasonText` uses `strings.TrimPrefix`; `ControlAndRbh` computed
+`stateError()`/`rbhStateError()` twice per plant; `cred.requested` was set before
+the argument checks, so a rejected call produced a pointless cleanup read; the
+session credential map was allocated with a capacity of zero; the nil-credential
+invariant in `fetchPublicKeys`, `writeParameters` and `submitSessions` is now
+checked rather than relied upon, so a future reordering of the procedure surfaces
+as a failed command instead of a panic; the 19-value session id space and its
+residual collision probability are documented.
+
+### API changes from the audit
+
+| candidate | released |
+| --- | --- |
+| `PlantCtrlState(...) ([]PlantState, error)` | `(PlantStates, error)` — one entry per plant, `PlantState.Err` per plant |
+| `PlantRbhState(...) ([]RbhState, error)` | `(RbhStates, error)` — likewise |
+| `PlantIceDetState(...) ([]IceDetState, error)` | `(IceDetStates, error)` — likewise |
+| — | `PlantStates`/`RbhStates`/`IceDetStates` with `Err()` and `Get(plant)` |
+| — | `TurbineInfo.Unsupported` |
+| — | `WithLenientVerification`, `WithSessionLifetime` |
+| — | `ErrSessionUnverified`, `ErrSessionExpired`, `ErrNoItemTime`, `ErrInvalidUserID` |
+
+## v2.0.0 — original v1 audit
 
 A breaking release that came out of an independent architecture and code audit of
 v1. Everything below the "Fixes" heading was a defect in v1 that could be
@@ -255,6 +399,12 @@ relying on a defect.
 - **The private key is drawn from 1 to 32000** although the item is a long word.
   The range is inherited from v1, which is known to work; widening it would
   improve unguessability but has not been verified against a plant.
+- **Plant numbers are `uint8` by design.** An Enercon park holds 20 to 30
+  turbines, so 255 is an order of magnitude of headroom, and the narrow type
+  keeps the number usable as a map key and struct field everywhere without
+  conversions. A plant node outside the range is reported in
+  `TurbineInfo.Unsupported` rather than dropped, so the limit cannot hide a
+  turbine.
 - No default session release is shipped; the data sheet defines none.
 - `WithMaxStateAge` is off by default and has to be enabled deliberately.
 - OPC XML-DA `MaxAge` is not sent, because gopcxmlda does not support it. The

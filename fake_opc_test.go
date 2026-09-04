@@ -44,19 +44,58 @@ type fakeOPC struct {
 	ReadBack   map[string][]uint64    // override what a Set… item reads back
 	ReadErr    error                  // fail every Read
 	WriteErr   error                  // fail every Write
+	StatusErr  error                  // fail every GetStatus
 	Reverse    bool                   // return response items in reverse order
 	NoHandles  bool                   // do not echo ClientItemHandle
 	StripNames bool                   // do not echo ItemName either
 	Timestamps bool                   // stamp response items with the current time
 
-	// Observations.
-	Writes     []WriteRecord
-	ReadCalls  int
-	WriteCalls int
+	OmitWrite  map[string]bool  // apply the write but drop the item from the response
+	ReadErrOn  map[string]error // fail a Read that requests an item with this name
+	WriteErrOn map[string]error // fail a Write that carries an item with this name
 
-	session   map[string]SessionState // "<plant>/<kind>"
-	sessionID map[uint8]uint64        // session id the client reserved with
-	staged    map[string][]uint32     // value staged in a session, by item name
+	// ResponseServerState is the ServerState reported on Read and Write
+	// responses. Empty means "the same as ServerState", which is what a healthy
+	// server does; setting it models a server that degrades after GetStatus.
+	ResponseServerState string
+
+	// ScalarArrays returns the array items as a bare scalar instead of a
+	// one-element array, which some servers do for a single value.
+	ScalarArrays bool
+
+	// LoopModeAfterSubmit routes the session through SessionWaitLoop (3) after
+	// the submit instead of going straight to SessionWaitEnd (4).
+	LoopModeAfterSubmit bool
+
+	// AutoFreeSessions returns a session to "free" once its final state has been
+	// observed, the way the session end timeout does on a real plant. A test
+	// that issues several commands to one plant needs it.
+	AutoFreeSessions bool
+
+	// OnWrite is called for every item name a Write carries, before the fake
+	// takes its own lock, so a test can observe overlapping requests.
+	OnWrite func(itemName string)
+
+	// ExtraBranches are additional item names a browse of Loc/Wec reports, for
+	// nodes that are not plants this package can address.
+	ExtraBranches []string
+	// BrowseErrOn fails a browse of exactly this item path.
+	BrowseErrOn map[string]error
+	// OnBrowse is called for every browsed path, before the fake takes its own
+	// lock, so a test can order concurrent browses against each other.
+	OnBrowse func(itemPath string)
+
+	// Observations.
+	Writes      []WriteRecord
+	ReadCalls   int
+	WriteCalls  int
+	BrowseCalls int
+
+	session     map[string]SessionState // "<plant>/<kind>"
+	sessionID   map[uint8]uint64        // session id the client reserved with
+	staged      map[string][]uint32     // value staged in a session, by item name
+	loopPending []string                // sessions in loop mode, promoted on the next read
+	freePending []string                // finished sessions, released on the next read
 }
 
 // WriteRecord is one item written by the package under test.
@@ -83,6 +122,10 @@ func newFakeOPC() *fakeOPC {
 		Branches:    map[uint8][]string{},
 		SessionID:   map[uint8]uint64{},
 		ReadBack:    map[string][]uint64{},
+		OmitWrite:   map[string]bool{},
+		ReadErrOn:   map[string]error{},
+		WriteErrOn:  map[string]error{},
+		BrowseErrOn: map[string]error{},
 		SessionTO:   60,
 		session:     map[string]SessionState{},
 		sessionID:   map[uint8]uint64{},
@@ -136,9 +179,15 @@ func sessionKey(plant uint8, kind SessionKind) string {
 	return fmt.Sprintf("%d/%s", plant, kind)
 }
 
-func (f *fakeOPC) GetStatus(_ context.Context, handle *string, _ string) (gopcxmlda.TGetStatus, error) {
+func (f *fakeOPC) GetStatus(ctx context.Context, handle *string, _ string) (gopcxmlda.TGetStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return gopcxmlda.TGetStatus{}, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.StatusErr != nil {
+		return gopcxmlda.TGetStatus{}, f.StatusErr
+	}
 	if *handle == "" {
 		*handle = "req"
 	}
@@ -147,13 +196,23 @@ func (f *fakeOPC) GetStatus(_ context.Context, handle *string, _ string) (gopcxm
 	return st, nil
 }
 
-func (f *fakeOPC) Read(_ context.Context, items []gopcxmlda.TItem, requestHandle *string,
+func (f *fakeOPC) Read(ctx context.Context, items []gopcxmlda.TItem, requestHandle *string,
 	itemHandles *[]string, _ string, _ map[string]interface{}) (gopcxmlda.TRead, error) {
+	// A real transport fails a cancelled request rather than serving it, and
+	// the cleanup path depends on that being true.
+	if err := ctx.Err(); err != nil {
+		return gopcxmlda.TRead{}, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ReadCalls++
 	if f.ReadErr != nil {
 		return gopcxmlda.TRead{}, f.ReadErr
+	}
+	for _, req := range items {
+		if err, ok := f.ReadErrOn[req.ItemName]; ok {
+			return gopcxmlda.TRead{}, err
+		}
 	}
 	f.fillHandles(requestHandle, itemHandles, len(items))
 
@@ -182,11 +241,15 @@ func (f *fakeOPC) Read(_ context.Context, items []gopcxmlda.TItem, requestHandle
 		if arr, ok := f.arrayValueOf(name); ok {
 			// Enercon defines SessionRequest and the Set… items as arrays of
 			// long words; gopcxmlda decodes those into []interface{}.
-			boxed := make([]interface{}, 0, len(arr))
-			for _, v := range arr {
-				boxed = append(boxed, v)
+			if f.ScalarArrays && len(arr) > 0 {
+				item.Value.Value = arr[0]
+			} else {
+				boxed := make([]interface{}, 0, len(arr))
+				for _, v := range arr {
+					boxed = append(boxed, v)
+				}
+				item.Value.Value = boxed
 			}
-			item.Value.Value = boxed
 		} else {
 			item.Value.Value = f.typedValue(name, f.valueOf(name))
 		}
@@ -198,9 +261,17 @@ func (f *fakeOPC) Read(_ context.Context, items []gopcxmlda.TItem, requestHandle
 		}
 	}
 	var r gopcxmlda.TRead
-	r.Response.Result.ServerState = f.ServerState
+	r.Response.Result.ServerState = f.responseServerState()
 	r.Response.ItemList.Items = out
 	return r, nil
+}
+
+// responseServerState is the ServerState reported on Read and Write responses.
+func (f *fakeOPC) responseServerState() string {
+	if f.ResponseServerState != "" {
+		return f.ResponseServerState
+	}
+	return f.ServerState
 }
 
 func (f *fakeOPC) qualityOf(name string) string {
@@ -254,7 +325,27 @@ func (f *fakeOPC) valueOf(name string) uint64 {
 		if f.Occupied[plant] {
 			return uint64(SessionOccupied)
 		}
-		return uint64(f.session[sessionKey(plant, SessionKind(kind))])
+		key := sessionKey(plant, SessionKind(kind))
+		state := f.session[key]
+		// A session parked in loop mode moves on to "waiting time session end"
+		// once it has been observed there, the way a real waiting time elapses.
+		for i, pending := range f.loopPending {
+			if pending == key {
+				f.session[key] = SessionWaitEnd
+				f.loopPending = append(f.loopPending[:i], f.loopPending[i+1:]...)
+				break
+			}
+		}
+		// Likewise a finished session returns to "free" once its final state
+		// has been observed, which is what the session end timeout does.
+		for i, pending := range f.freePending {
+			if pending == key {
+				f.session[key] = SessionFree
+				f.freePending = append(f.freePending[:i], f.freePending[i+1:]...)
+				break
+			}
+		}
+		return uint64(state)
 	case strings.HasSuffix(name, "/SessionTimeOut"):
 		return f.SessionTO
 	case strings.HasSuffix(name, "/SessionPubKey"):
@@ -300,13 +391,26 @@ func (f *fakeOPC) typedValue(name string, v uint64) any {
 	}
 }
 
-func (f *fakeOPC) Write(_ context.Context, items []gopcxmlda.TItem, requestHandle *string,
+func (f *fakeOPC) Write(ctx context.Context, items []gopcxmlda.TItem, requestHandle *string,
 	itemHandles *[]string, _ string, _ map[string]interface{}) (gopcxmlda.TWrite, error) {
+	if err := ctx.Err(); err != nil {
+		return gopcxmlda.TWrite{}, err
+	}
+	if f.OnWrite != nil {
+		for _, req := range items {
+			f.OnWrite(req.ItemName)
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.WriteCalls++
 	if f.WriteErr != nil {
 		return gopcxmlda.TWrite{}, f.WriteErr
+	}
+	for _, req := range items {
+		if err, ok := f.WriteErrOn[req.ItemName]; ok {
+			return gopcxmlda.TWrite{}, err
+		}
 	}
 	f.fillHandles(requestHandle, itemHandles, len(items))
 
@@ -325,10 +429,15 @@ func (f *fakeOPC) Write(_ context.Context, items []gopcxmlda.TItem, requestHandl
 		}
 		f.Writes = append(f.Writes, WriteRecord{ItemName: name, Value: value})
 		f.applyWrite(name, value)
+		if f.OmitWrite[name] {
+			// The write was applied, but the server does not echo the item —
+			// the response carries no confirmation for it either way.
+			continue
+		}
 		out = append(out, item)
 	}
 	var w gopcxmlda.TWrite
-	w.Response.Result.ServerState = f.ServerState
+	w.Response.Result.ServerState = f.responseServerState()
 	w.Response.ItemList.Items = out
 	return w, nil
 }
@@ -375,7 +484,15 @@ func (f *fakeOPC) applyWrite(name string, value []uint32) {
 				}
 			}
 		}
+		if f.LoopModeAfterSubmit {
+			f.advance(plant, kind, SessionWaitLoop)
+			f.loopPending = append(f.loopPending, sessionKey(plant, kind))
+			return
+		}
 		f.advance(plant, kind, SessionWaitEnd)
+		if f.AutoFreeSessions {
+			f.freePending = append(f.freePending, sessionKey(plant, kind))
+		}
 	}
 }
 
@@ -411,10 +528,20 @@ func rbhStatusAfter(before uint64, cmd RbhValue) uint64 {
 	return status
 }
 
-func (f *fakeOPC) Browse(_ context.Context, itemPath string, handle *string, _ string,
+func (f *fakeOPC) Browse(ctx context.Context, itemPath string, handle *string, _ string,
 	options gopcxmlda.TBrowseOptions) (gopcxmlda.TBrowse, error) {
+	if f.OnBrowse != nil {
+		f.OnBrowse(itemPath)
+	}
+	if err := ctx.Err(); err != nil {
+		return gopcxmlda.TBrowse{}, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.BrowseCalls++
+	if err, ok := f.BrowseErrOn[itemPath]; ok {
+		return gopcxmlda.TBrowse{}, err
+	}
 	if *handle == "" {
 		*handle = "req"
 	}
@@ -429,6 +556,13 @@ func (f *fakeOPC) Browse(_ context.Context, itemPath string, handle *string, _ s
 			b.Response.Elements = append(b.Response.Elements, gopcxmlda.TBrowseElement{
 				Name:        fmt.Sprintf("Plant%d", p),
 				ItemName:    fmt.Sprintf("Loc/Wec/Plant%d", p),
+				HasChildren: true,
+			})
+		}
+		for _, name := range f.ExtraBranches {
+			b.Response.Elements = append(b.Response.Elements, gopcxmlda.TBrowseElement{
+				Name:        strings.TrimPrefix(name, "Loc/Wec/"),
+				ItemName:    name,
 				HasChildren: true,
 			})
 		}

@@ -86,19 +86,19 @@ func ParkNoMatch(ctx context.Context, opc OpcClient, parkNo uint64, checkAvailab
 
 // PlantCtrlState reads the control state of the given plants.
 // See Client.PlantCtrlState.
-func PlantCtrlState(ctx context.Context, opc OpcClient, plants ...uint8) ([]PlantState, error) {
+func PlantCtrlState(ctx context.Context, opc OpcClient, plants ...uint8) (PlantStates, error) {
 	return New(opc).PlantCtrlState(ctx, plants...)
 }
 
 // PlantRbhState reads the heating status of the given plants.
 // See Client.PlantRbhState.
-func PlantRbhState(ctx context.Context, opc OpcClient, plants ...uint8) ([]RbhState, error) {
+func PlantRbhState(ctx context.Context, opc OpcClient, plants ...uint8) (RbhStates, error) {
 	return New(opc).PlantRbhState(ctx, plants...)
 }
 
 // PlantIceDetState reads the ice detection status of the given plants.
 // See Client.PlantIceDetState.
-func PlantIceDetState(ctx context.Context, opc OpcClient, plants ...uint8) ([]IceDetState, error) {
+func PlantIceDetState(ctx context.Context, opc OpcClient, plants ...uint8) (IceDetStates, error) {
 	return New(opc).PlantIceDetState(ctx, plants...)
 }
 

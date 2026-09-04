@@ -146,8 +146,31 @@ func (c *Client) readItems(ctx context.Context, names []string) (map[string]gopc
 	if err != nil {
 		return nil, wrapf(err, "read %d item(s)", len(names))
 	}
+	if err := requireRunning(resp.Response.Result.ServerState); err != nil {
+		return nil, err
+	}
 	return correlate(names, itemHandles, resp.Response.ItemList.Items)
 }
+
+// requireRunning checks the ServerState that OPC XML-DA carries in the reply
+// base of every response.
+//
+// Checking it once with GetStatus before a command is a time-of-check to
+// time-of-use test: a command takes several requests, and a server that goes to
+// "failed" or "suspended" in between would otherwise keep receiving control
+// commands and keep having its values used as process values. An empty state is
+// tolerated, because not every server fills the attribute — that is the absence
+// of a statement, not a statement of failure.
+func requireRunning(state string) error {
+	if s := strings.TrimSpace(state); s != "" && s != serverStateRunning {
+		return &serverStateError{state: s}
+	}
+	return nil
+}
+
+// serverStateRunning is the only ServerState in which a server may be given a
+// control command.
+const serverStateRunning = "running"
 
 // writeItem is one item of a batched write.
 //
@@ -169,12 +192,20 @@ func longWord(v uint64, what string) (uint32, error) {
 }
 
 // writeValues writes the given items in a single request and returns one entry
-// per item name: nil if the server accepted it, otherwise the reason.
+// per item name: nil if the server confirmed it, otherwise the reason.
 //
-// Servers differ in how much they echo in a WriteResponse. An item the server
-// reports on is checked for its ResultID; items the server does not mention are
-// treated as accepted, because a top-level fault would already have surfaced as
-// the returned error.
+// An item the server reports on is checked for its ResultID. An item the server
+// does not mention at all is *not* confirmed, and an unconfirmed write is not a
+// write: gopcxmlda sends ReturnValuesOnReply, so the response is expected to
+// carry one item per written item, and a missing one is a gap in the evidence
+// rather than silent consent. This mirrors the rule reads follow — a missing
+// item is an error, not a value.
+//
+// The earlier behaviour treated a missing item as accepted, on the grounds that
+// a top-level fault would have surfaced as the returned error. That argument
+// does not cover the case it needs to: a server that answers successfully but
+// omits one item from the list. WithLenientVerification restores it for servers
+// that genuinely do not echo written items.
 func (c *Client) writeValues(ctx context.Context, items []writeItem) (map[string]error, error) {
 	if len(items) == 0 {
 		return map[string]error{}, nil
@@ -194,6 +225,9 @@ func (c *Client) writeValues(ctx context.Context, items []writeItem) (map[string
 	if err != nil {
 		return nil, wrapf(err, "write %d item(s)", len(items))
 	}
+	if err := requireRunning(resp.Response.Result.ServerState); err != nil {
+		return nil, err
+	}
 	byName, err := correlate(names, itemHandles, resp.Response.ItemList.Items)
 	if err != nil {
 		return nil, err
@@ -202,7 +236,12 @@ func (c *Client) writeValues(ctx context.Context, items []writeItem) (map[string
 	for _, n := range names {
 		it, ok := byName[n]
 		if !ok {
-			out[n] = nil
+			if c.lenientVerification {
+				out[n] = nil
+				continue
+			}
+			out[n] = &ItemError{ItemName: n, Reason: ErrItemMissing,
+				Detail: "the server did not confirm the write"}
 			continue
 		}
 		if it.Error != "" {
@@ -278,7 +317,15 @@ func (c *Client) itemUsable(it gopcxmlda.TItem, name string) error {
 	if q := it.Quality.QualityField; !qualityUsable(q) {
 		return &ItemError{ItemName: name, Reason: ErrBadQuality, Detail: "quality=" + q}
 	}
-	if c.maxStateAge > 0 && !it.Timestamp.IsZero() {
+	if c.maxStateAge > 0 {
+		// A maximum age is an explicit requirement, and it cannot be met by an
+		// item whose age is unknown. Skipping the check here would disable the
+		// caller's safety net precisely on the servers it was asked for: one
+		// that answers from a cache is more likely, not less, to be one that
+		// does not support ReturnItemTime.
+		if it.Timestamp.IsZero() {
+			return &ItemError{ItemName: name, Reason: ErrNoItemTime}
+		}
 		if age := c.now().Sub(it.Timestamp); age > c.maxStateAge {
 			return &ItemError{ItemName: name, Reason: ErrStaleValue,
 				Detail: fmt.Sprintf("age %s exceeds %s", age.Round(0), c.maxStateAge)}
@@ -300,6 +347,11 @@ func (c *Client) itemUint64Slice(it gopcxmlda.TItem, name string) ([]uint64, err
 }
 
 // toUint64Slice accepts the shapes gopcxmlda produces for an ArrayOf… value.
+//
+// A bare scalar is accepted as a one-element array: a server is free to type a
+// single value as a scalar, and the checks that read these items back only look
+// at the first element. Rejecting that shape would turn a server's encoding
+// choice into an unverifiable session.
 func toUint64Slice(v any) ([]uint64, error) {
 	switch a := v.(type) {
 	case []interface{}:
@@ -317,7 +369,11 @@ func toUint64Slice(v any) ([]uint64, error) {
 	case nil:
 		return nil, fmt.Errorf("item carries no value")
 	default:
-		return nil, fmt.Errorf("cannot use %T as an array of unsigned integers", v)
+		n, err := toUint64(v)
+		if err != nil {
+			return nil, fmt.Errorf("cannot use %T as an array of unsigned integers", v)
+		}
+		return []uint64{n}, nil
 	}
 }
 
@@ -389,8 +445,10 @@ func wrapf(err error, format string, args ...any) error {
 	return fmt.Errorf("energontrol: %s: %w", fmt.Sprintf(format, args...), err)
 }
 
-// ctx is checked before every request so a cancelled context stops a command
-// promptly instead of running to the end of a retry budget.
+// ctxErr reports a cancelled context. It is checked when a command is entered
+// and once per polling round, so a cancelled context stops a command promptly
+// instead of running to the end of its polling budget. The requests themselves
+// carry the context and are cancelled by the transport.
 func ctxErr(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
