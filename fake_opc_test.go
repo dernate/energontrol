@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -285,10 +286,9 @@ func (f *fakeOPC) qualityOf(name string) string {
 // session id (the other two elements are not readable), and the Set… items
 // report back the value that was written.
 func (f *fakeOPC) arrayValueOf(name string) ([]uint64, bool) {
-	var plant uint8
 	switch {
 	case strings.HasSuffix(name, "/SessionRequest"):
-		kindOf(name, "/SessionRequest", &plant)
+		plant, _, _ := parseItem(name)
 		id, ok := f.SessionID[plant]
 		if !ok {
 			id = f.sessionID[plant]
@@ -316,16 +316,13 @@ func (f *fakeOPC) valueOf(name string) uint64 {
 	if name == parkNoItem {
 		return f.ParkNo
 	}
-	var plant uint8
-	switch {
-	case strings.HasSuffix(name, "/SessionState"):
-		var kind string
-		fmt.Sscanf(name, "Loc/Wec/Plant%d/%s", &plant, &kind)
-		kind = strings.TrimSuffix(kind, "/SessionState")
+	plant, kind, leaf := parseItem(name)
+	switch leaf {
+	case "SessionState":
 		if f.Occupied[plant] {
 			return uint64(SessionOccupied)
 		}
-		key := sessionKey(plant, SessionKind(kind))
+		key := sessionKey(plant, kind)
 		state := f.session[key]
 		// A session parked in loop mode moves on to "waiting time session end"
 		// once it has been observed there, the way a real waiting time elapses.
@@ -346,18 +343,15 @@ func (f *fakeOPC) valueOf(name string) uint64 {
 			}
 		}
 		return uint64(state)
-	case strings.HasSuffix(name, "/SessionTimeOut"):
+	case "SessionTimeOut":
 		return f.SessionTO
-	case strings.HasSuffix(name, "/SessionPubKey"):
+	case "SessionPubKey":
 		return f.PubKey
-	case strings.HasSuffix(name, "/Ctrl/Rbh"):
-		fmt.Sscanf(name, "Loc/Wec/Plant%d/Ctrl/Rbh", &plant)
+	case "Rbh":
 		return f.Rbh[plant]
-	case strings.HasSuffix(name, "/Ctrl/IceDet"):
-		fmt.Sscanf(name, "Loc/Wec/Plant%d/Ctrl/IceDet", &plant)
+	case "IceDet":
 		return f.IceDet[plant]
-	case strings.HasSuffix(name, "/Ctrl/Ctrl"):
-		fmt.Sscanf(name, "Loc/Wec/Plant%d/Ctrl/Ctrl", &plant)
+	case "Ctrl":
 		return f.Ctrl[plant]
 	}
 	return 0
@@ -447,25 +441,17 @@ func (f *fakeOPC) Write(ctx context.Context, items []gopcxmlda.TItem, requestHan
 // -> waiting time session end on SessionSubmit, at which point the staged value
 // becomes the plant's new state.
 func (f *fakeOPC) applyWrite(name string, value []uint32) {
-	var plant uint8
-	switch {
-	case strings.HasSuffix(name, "/SessionRequest"):
-		kind := kindOf(name, "/SessionRequest", &plant)
+	plant, kind, leaf := parseItem(name)
+	switch leaf {
+	case "SessionRequest":
 		if len(value) > 0 {
 			f.sessionID[plant] = uint64(value[0])
 		}
 		f.advance(plant, kind, SessionReserved)
-	case strings.HasSuffix(name, "/Ctrl/SetCtrl"), strings.HasSuffix(name, "/Ctrl/SetRbh"),
-		strings.HasSuffix(name, "/Ctrl/SetIceDet"):
-		fmt.Sscanf(name, "Loc/Wec/Plant%d/Ctrl/", &plant)
+	case "SetCtrl", "SetRbh", "SetIceDet", "SetReset":
 		f.staged[name] = value
-		f.advance(plant, SessionCtrl, SessionParameterInput)
-	case strings.HasSuffix(name, "/Reset/SetReset"):
-		fmt.Sscanf(name, "Loc/Wec/Plant%d/Reset/SetReset", &plant)
-		f.staged[name] = value
-		f.advance(plant, SessionReset, SessionParameterInput)
-	case strings.HasSuffix(name, "/SessionSubmit"):
-		kind := kindOf(name, "/SessionSubmit", &plant)
+		f.advance(plant, kind, SessionParameterInput)
+	case "SessionSubmit":
 		if f.session[sessionKey(plant, kind)] != SessionParameterInput {
 			return
 		}
@@ -496,11 +482,32 @@ func (f *fakeOPC) applyWrite(name string, value []uint32) {
 	}
 }
 
-func kindOf(name, suffix string, plant *uint8) SessionKind {
-	trimmed := strings.TrimSuffix(name, suffix)
-	var kind string
-	fmt.Sscanf(trimmed, "Loc/Wec/Plant%d/%s", plant, &kind)
-	return SessionKind(kind)
+// parseItem splits a plant item name into the plant it addresses, the branch it
+// sits in and its leaf name.
+//
+// It panics on a name it cannot parse. The fake used to pick these apart with
+// four separate unchecked fmt.Sscanf calls, which left the plant number at 0 for
+// anything unexpected — so the fake would happily answer for plant 0 and the
+// test would pass for the wrong reason. In a test double a name that does not
+// parse is a bug in the test, not a condition worth modelling.
+func parseItem(name string) (plant uint8, kind SessionKind, leaf string) {
+	rest, ok := strings.CutPrefix(name, "Loc/Wec/Plant")
+	if !ok {
+		panic("fakeOPC: not a plant item: " + name)
+	}
+	number, rest, ok := strings.Cut(rest, "/")
+	if !ok {
+		panic("fakeOPC: item name has no branch: " + name)
+	}
+	n, err := strconv.ParseUint(number, 10, 8)
+	if err != nil {
+		panic("fakeOPC: unparseable plant number in " + name + ": " + err.Error())
+	}
+	branch, leaf, ok := strings.Cut(rest, "/")
+	if !ok {
+		panic("fakeOPC: item name has no leaf: " + name)
+	}
+	return uint8(n), SessionKind(branch), leaf
 }
 
 // advance moves a session forward unless the test pinned it.

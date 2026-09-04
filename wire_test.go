@@ -36,7 +36,7 @@ func TestWireArrayTypeIsLongWord(t *testing.T) {
 
 		switch {
 		case strings.Contains(action, "GetStatus"):
-			fmt.Fprint(w, envelope(fmt.Sprintf(
+			_, _ = fmt.Fprint(w, envelope(fmt.Sprintf(
 				`<GetStatusResponse xmlns="http://opcfoundation.org/webservices/XMLDA/1.0/">`+
 					`<GetStatusResult RcvTime="%s" ReplyTime="%s" ServerState="running"/><Status/>`+
 					`</GetStatusResponse>`, now, now)))
@@ -50,11 +50,11 @@ func TestWireArrayTypeIsLongWord(t *testing.T) {
 				case strings.HasSuffix(name, "/Ctrl/Ctrl"):
 					value = "0" // running, so a stop is needed
 				}
-				items.WriteString(fmt.Sprintf(
+				fmt.Fprintf(&items,
 					`<Items ItemName="%s"><Value xsi:type="xsd:%s">%s</Value>`+
-						`<Quality QualityField="good"/></Items>`, name, typ, value))
+						`<Quality QualityField="good"/></Items>`, name, typ, value)
 			}
-			fmt.Fprint(w, envelope(fmt.Sprintf(
+			_, _ = fmt.Fprint(w, envelope(fmt.Sprintf(
 				`<ReadResponse xmlns="http://opcfoundation.org/webservices/XMLDA/1.0/">`+
 					`<ReadResult RcvTime="%s" ReplyTime="%s" ServerState="running"/>`+
 					`<RItemList>%s</RItemList></ReadResponse>`, now, now, items.String())))
@@ -62,7 +62,7 @@ func TestWireArrayTypeIsLongWord(t *testing.T) {
 			mu.Lock()
 			writeBodies = append(writeBodies, string(body))
 			mu.Unlock()
-			fmt.Fprint(w, envelope(fmt.Sprintf(
+			_, _ = fmt.Fprint(w, envelope(fmt.Sprintf(
 				`<WriteResponse xmlns="http://opcfoundation.org/webservices/XMLDA/1.0/">`+
 					`<WriteResult RcvTime="%s" ReplyTime="%s" ServerState="running"/>`+
 					`<RItemList/></WriteResponse>`, now, now)))
@@ -120,7 +120,7 @@ func TestWireReadOptionsUseSpecCasing(t *testing.T) {
 			readBody = string(body)
 			mu.Unlock()
 		}
-		fmt.Fprint(w, envelope(fmt.Sprintf(
+		_, _ = fmt.Fprint(w, envelope(fmt.Sprintf(
 			`<ReadResponse xmlns="http://opcfoundation.org/webservices/XMLDA/1.0/">`+
 				`<ReadResult RcvTime="%s" ReplyTime="%s" ServerState="running"/>`+
 				`<RItemList><Items ItemName="Loc/Wec/Plant2/Ctrl/Ctrl">`+

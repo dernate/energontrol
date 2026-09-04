@@ -39,11 +39,20 @@ jobs:
       - name: go vet (live tests)
         run: go vet -tags opc_integration ./...
 
-      - name: staticcheck
-        uses: dominikh/staticcheck-action@v1
+      # golangci-lint rather than staticcheck alone: it bundles staticcheck and
+      # adds errcheck, ineffassign and unused, which caught unchecked
+      # fmt.Sscanf calls in the test fake that standalone staticcheck passes.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
         with:
           version: latest
-          install-go: false
+          args: --timeout 5m
+
+      - name: golangci-lint (live tests)
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout 5m --build-tags opc_integration
 
       # -race matters here: the Client serialises commands per plant and browses
       # a park concurrently.
