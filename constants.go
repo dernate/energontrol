@@ -52,7 +52,9 @@ const (
 	// 90° blade angle.
 	CtrlStopSpeciesProtection90 CtrlValue = 8
 
-	// The values below are reported by Ctrl and must not be written.
+	// The values below are reported by Ctrl and must not be written. The values
+	// above are both written and reported: Ctrl carries the value that was set,
+	// so after SetCtrl 7 the plant reads 7 and holds it.
 
 	// CtrlValueRejected means the plant rejected the written control value.
 	// Enercon lists it among the feedback codes of Ctrl.
@@ -102,40 +104,97 @@ func (v CtrlValue) Writable() bool {
 }
 
 // Stopped reports whether the plant reports a stopped state, including the
-// states reserved for Enercon.
+// states reserved for Enercon and the command values a plant echoes back.
 //
 // It is false for CtrlCommError: an uninitialised value means the SCADA cannot
-// reach the plant, so the plant is not known to be stopped. It is also false for
-// the command values 3 to 8, which a plant never reports back — Ctrl only ever
-// carries 0, 1, 2, 121, 129, 130 or 255.
+// reach the plant, so the plant is not known to be stopped. It is false for
+// CtrlValueRejected for the same reason, and for any value this package does not
+// know.
 func (v CtrlValue) Stopped() bool {
-	return v == CtrlStop60 || v == CtrlStop90 || v == CtrlStop60Enercon || v == CtrlStopEnercon
+	switch v {
+	case CtrlStop60, CtrlStop90,
+		CtrlGradientStop60, CtrlGradientStop90,
+		CtrlStopIceDetection, CtrlStopShadowFlicker,
+		CtrlStopSpeciesProtection60, CtrlStopSpeciesProtection90,
+		CtrlStop60Enercon, CtrlStopEnercon:
+		return true
+	default:
+		return false
+	}
 }
 
-// Commandable reports whether a client can still change this state. Enercon:
-// "only operating states with the values 0-2 can be changed".
-func (v CtrlValue) Commandable() bool {
-	return v == CtrlStart || v == CtrlStop60 || v == CtrlStop90
-}
-
-// expectedCtrlAfter returns the state the plant reports once this command has
-// taken effect, and whether Enercon documents one.
+// stopDepth ranks how far a state has the plant shut down — running, stopped at
+// 60°, stopped at 90° — so that "at least as stopped as requested" is a
+// comparison rather than a set membership test.
 //
-// A plant never reports the command values 3 to 8; it reports the resulting
-// blade angle. For the two commands whose name does not name an angle — stop for
-// ice detection and stop for shadow flicker — the resulting state is not
-// documented, so no state can be claimed to already satisfy them.
-func (v CtrlValue) expectedCtrlAfter() (CtrlValue, bool) {
+// The two states Enercon reserves for itself rank with the angle they name:
+// CtrlStop60Enercon is a 60° stop, CtrlStopEnercon a 90° one. That is what lets
+// an unforced stop tolerate them without also letting a 60° stop pass for a 90°
+// one.
+//
+// A state that carries no rank ranks below running, so it satisfies no stop
+// request at all: CtrlValueRejected and CtrlCommError say nothing about where the
+// blades are, and neither do the two stops whose name does not name an angle —
+// a plant stopped for ice detection is stopped, but not at a known angle.
+//
+// The same ranking is applied to a requested command value, which works because
+// a command and the state it produces carry the same angle.
+func (v CtrlValue) stopDepth() int {
 	switch v {
 	case CtrlStart:
-		return CtrlStart, true
-	case CtrlStop60, CtrlGradientStop60, CtrlStopSpeciesProtection60:
-		return CtrlStop60, true
-	case CtrlStop90, CtrlGradientStop90, CtrlStopSpeciesProtection90:
-		return CtrlStop90, true
+		return 0
+	case CtrlStop60, CtrlGradientStop60, CtrlStopSpeciesProtection60, CtrlStop60Enercon:
+		return 1
+	case CtrlStop90, CtrlGradientStop90, CtrlStopSpeciesProtection90, CtrlStopEnercon:
+		return 2
 	default:
-		return 0, false
+		return -1
 	}
+}
+
+// Commandable reports whether a client can still change this state.
+//
+// The data sheet says "only operating states with the values 0-2 can be
+// changed", which reads as though a client-initiated gradient or
+// species-protection stop could never be undone. A real park shows otherwise: it
+// reports the command value itself, and a plant reporting 7 can be started
+// again. The sentence describes the three states that table lists, not a
+// lock-out, so every state a client can have caused is commandable.
+//
+// The states reserved for Enercon are not, and neither is a rejected value, a
+// communication error, or a value this package does not know: for those the
+// command is refused before a session is opened.
+func (v CtrlValue) Commandable() bool {
+	switch v {
+	case CtrlStart, CtrlStop60, CtrlStop90,
+		CtrlGradientStop60, CtrlGradientStop90,
+		CtrlStopIceDetection, CtrlStopShadowFlicker,
+		CtrlStopSpeciesProtection60, CtrlStopSpeciesProtection90:
+		return true
+	default:
+		return false
+	}
+}
+
+// Reached reports whether a plant reporting state v has carried out the command
+// value want.
+//
+// Ctrl carries the value that was set. A plant stopped for species protection at
+// 60° reports 7, not the 60° blade angle that stop produces, and it holds 7 — no
+// blade angle has ever been observed in that item. So this is exact equality,
+// and it is a named method rather than a bare comparison because the rule is not
+// obvious from the data sheet, which describes Ctrl as an operating state, and
+// because a monitoring loop needs to ask exactly this.
+//
+// It is deliberately not satisfied by a different command that leaves the blades
+// at the same angle: a plant reporting CtrlStop90 has not carried out a gradient
+// stop at 90°. Treating the two as interchangeable made a forced request for the
+// gradient stop report success without sending anything.
+//
+// For the looser question "is this plant stopped at all", use Stopped; for "is
+// it at least as stopped as I asked", an unforced Stop already answers it.
+func (v CtrlValue) Reached(want CtrlValue) bool {
+	return v == want
 }
 
 // stateError returns the error that describes why a plant in this state cannot
@@ -150,7 +209,7 @@ func (v CtrlValue) stateError() error {
 		return fmt.Errorf("%w (state %s)", ErrCtrlValueRejected, v)
 	default:
 		if !v.Commandable() {
-			return fmt.Errorf("%w: unknown state %s", ErrSessionState, v)
+			return fmt.Errorf("%w (state %s)", ErrPlantStateUnknown, v)
 		}
 		return nil
 	}

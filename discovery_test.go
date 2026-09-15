@@ -1,18 +1,15 @@
 package energontrol
 
+// Listing a park: which plants it holds, which functions each one offers, and
+// which nodes this package cannot address.
+
 import (
 	"context"
 	"errors"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/dernate/gopcxmlda"
 )
-
-// discovery.go had no unit test at all before this file: 148 lines reachable
-// only through the live tests, in the one module whose output decides which
-// plants a caller addresses in the first place.
 
 func parkFake() *fakeOPC {
 	f := newFakeOPC()
@@ -23,6 +20,85 @@ func parkFake() *fakeOPC {
 		9: {"Ctrl", "Reset", "SetCtrl", "SetRbh", "SetReset"},
 	}
 	return f
+}
+
+// A plant node the package cannot address is logged as well as reported, so it
+// shows up in an operator's log and not only in a struct field nobody reads.
+func TestUnsupportedPlantNodeIsLogged(t *testing.T) {
+	f := parkFake()
+	f.ExtraBranches = []string{"Loc/Wec/Plant300"}
+
+	rec, logger := newRecordingLogger()
+	if _, err := New(f, WithLogger(logger)).Turbines(context.Background()); err != nil {
+		t.Fatalf("Turbines: %v", err)
+	}
+	if got := rec.text(); !strings.Contains(got, "Plant300") {
+		t.Errorf("the unaddressable plant was not logged:\n%s", got)
+	}
+}
+
+// A browse failure surfaces unchanged rather than as an empty park listing.
+// Naming the path that was refused is the transport's job, since the transport
+// is what talks to the SCADA — see TestAdapterBrowseFailureNamesThePath.
+func TestBrowseFailureSurfaces(t *testing.T) {
+	for _, path := range []string{"Loc/Wec", "Loc/Wec/Plant5"} {
+		t.Run(path, func(t *testing.T) {
+			f := parkFake()
+			f.BrowseErrOn[path] = errTransport
+
+			info, err := New(f).Turbines(context.Background())
+			if !errors.Is(err, errTransport) {
+				t.Fatalf("err = %v, want it to wrap the transport error", err)
+			}
+			if len(info.PlantNo) != 0 {
+				t.Errorf("a park listing was returned alongside the error: %+v", info)
+			}
+		})
+	}
+}
+
+// Before the fix a node named Plant007 was taken as plant 7 and then addressed
+// as Plant7 — an item name the server does not have. The command failed with
+// ErrItemMissing, which says nothing about the cause, and the listing claimed
+// the plant was addressable. A node this package cannot address under the name
+// the server gave it belongs in Unsupported.
+func TestPlantNodeThatCannotBeAddressedUnderItsOwnNameIsReported(t *testing.T) {
+	f := newFakeOPC()
+	f.ExtraNodes = []Node{
+		{Name: "Plant007", ItemName: "Loc/Wec/Plant007", HasChildren: true},
+	}
+	f.Branches = map[uint8][]string{2: {"Ctrl", "SetCtrl"}}
+
+	info, err := New(f).Turbines(context.Background())
+	if err != nil {
+		t.Fatalf("Turbines: %v", err)
+	}
+	for _, p := range info.PlantNo {
+		if p == 7 {
+			t.Error("Plant007 was listed as plant 7, which this package would address as Plant7")
+		}
+	}
+	joined := strings.Join(info.Unsupported, " ")
+	if !strings.Contains(joined, "Plant007") {
+		t.Errorf("Unsupported = %v, want it to name Plant007", info.Unsupported)
+	}
+}
+
+// The ordinary spelling stays addressable, of course.
+func TestCanonicallyNamedPlantNodeIsAddressable(t *testing.T) {
+	f := newFakeOPC()
+	f.Branches = map[uint8][]string{2: {"Ctrl", "SetCtrl"}, 11: {"Ctrl", "SetCtrl"}}
+
+	info, err := New(f).Turbines(context.Background())
+	if err != nil {
+		t.Fatalf("Turbines: %v", err)
+	}
+	if len(info.PlantNo) != 2 || info.PlantNo[0] != 2 || info.PlantNo[1] != 11 {
+		t.Errorf("plants = %v, want [2 11]", info.PlantNo)
+	}
+	if len(info.Unsupported) != 0 {
+		t.Errorf("Unsupported = %v, want none", info.Unsupported)
+	}
 }
 
 func TestTurbinesReportsEveryFunctionOfEveryPlant(t *testing.T) {
@@ -70,7 +146,7 @@ func TestTurbinesReportsEveryFunctionOfEveryPlant(t *testing.T) {
 	}
 }
 
-// A11: a plant number this package cannot represent used to vanish without a
+// A plant number this package cannot represent used to vanish without a
 // trace, and a plant that is not listed is never commanded and never monitored.
 func TestTurbinesReportsPlantsItCannotRepresent(t *testing.T) {
 	f := parkFake()
@@ -102,7 +178,7 @@ func TestTurbinesReportsPlantsItCannotRepresent(t *testing.T) {
 	}
 }
 
-// F12: a failure while collecting the functions of one plant must not come back
+// A failure while collecting the functions of one plant must not come back
 // as a half-filled park listing next to an error. A caller who ignores the error
 // would read "not listed" as "has no Ctrl".
 func TestTurbinesDoesNotReturnAPartialPark(t *testing.T) {
@@ -126,7 +202,7 @@ func TestTurbinesFailsOnASuspendedServer(t *testing.T) {
 	}
 }
 
-// F12: the per-plant browses are independent, so they are issued concurrently.
+// The per-plant browses are independent, so they are issued concurrently.
 // The point of the test is the request count, not the wall clock: three plants
 // must not cost more than two browses each plus the two park-level requests.
 func TestTurbinesDoesNotBrowseMoreThanNecessary(t *testing.T) {
@@ -136,8 +212,8 @@ func TestTurbinesDoesNotBrowseMoreThanNecessary(t *testing.T) {
 	}
 	// 1 browse of Loc/Wec, then per plant: the branch browse plus at most one
 	// browse each of Ctrl and Reset.
-	if max := 1 + 3*3; f.BrowseCalls > max {
-		t.Errorf("%d browse requests for 3 plants, want at most %d", f.BrowseCalls, max)
+	if limit := 1 + 3*3; f.BrowseCalls > limit {
+		t.Errorf("%d browse requests for 3 plants, want at most %d", f.BrowseCalls, limit)
 	}
 }
 
@@ -160,7 +236,7 @@ func TestParkNoRejectsAnUnusableValue(t *testing.T) {
 	}
 }
 
-// A12: a park match read from a server that is not running is not a match a
+// A park match read from a server that is not running is not a match a
 // caller may act on. It used to come back as (true, nil) whenever
 // checkAvailable was false, which is how the live tests guard themselves.
 func TestParkNoMatch(t *testing.T) {
@@ -190,15 +266,18 @@ func TestParkNoMatch(t *testing.T) {
 }
 
 func TestFilterPlants(t *testing.T) {
-	browse := gopcxmlda.TBrowse{}
+	var nodes []Node
 	for _, name := range []string{
 		"Loc/Wec/Plant7", "Loc/Wec/Plant300", "Loc/Wec/Plant12",
 		"Loc/Wec/PlantX", "Loc/Wec/Weather", "Loc/Wec/Plant7x",
 	} {
-		browse.Response.Elements = append(browse.Response.Elements,
-			gopcxmlda.TBrowseElement{ItemName: name, HasChildren: true})
+		nodes = append(nodes, Node{
+			Name:        strings.TrimPrefix(name, "Loc/Wec/"),
+			ItemName:    name,
+			HasChildren: true,
+		})
 	}
-	plants, unsupported := filterPlants(browse)
+	plants, unsupported := filterPlants(nodes, defaultNamer)
 	// Sorted, so two runs against the same park compare equal whatever order
 	// the server listed the nodes in.
 	if len(plants) != 2 || plants[0] != 7 || plants[1] != 12 {
@@ -218,6 +297,73 @@ func TestFilterPlants(t *testing.T) {
 	}
 	if strings.Contains(joined, "Weather") {
 		t.Errorf("unsupported = %v, should not list a node that is not a plant", unsupported)
+	}
+}
+
+// OPC XML-DA requires ItemName only for items, so a server may leave it
+// empty for a branch. Matching the item name alone let such a plant fall
+// through both branches — not addressable and not reported — which is the exact
+// silent loss the Unsupported list exists to prevent.
+func TestFilterPlantsAcceptsAPlantNamedOnlyInName(t *testing.T) {
+	plants, unsupported := filterPlants([]Node{
+		{Name: "Plant2", HasChildren: true},
+		{Name: "Plant11", HasChildren: true},
+	}, defaultNamer)
+	if len(plants) != 2 || plants[0] != 2 || plants[1] != 11 {
+		t.Errorf("plants = %v, want [2 11]: a plant named only in Name still exists", plants)
+	}
+	if len(unsupported) != 0 {
+		t.Errorf("unsupported = %v, want none: both plants were addressable", unsupported)
+	}
+}
+
+// The same rule from the other side: a node this function cannot make sense of
+// at all is reported, because deciding to stay silent about it would require
+// being sure it is not a plant.
+func TestFilterPlantsReportsANodeWithNoNameAtAll(t *testing.T) {
+	plants, unsupported := filterPlants([]Node{{HasChildren: true}}, defaultNamer)
+	if len(plants) != 0 {
+		t.Errorf("plants = %v, want none", plants)
+	}
+	if len(unsupported) != 1 {
+		t.Fatalf("unsupported = %v, want the nameless node reported", unsupported)
+	}
+}
+
+// A number that arrives twice — once as an item name and once as a bare name —
+// must not produce two entries, or the plant would be browsed and commanded
+// twice.
+func TestFilterPlantsDeduplicates(t *testing.T) {
+	plants, _ := filterPlants([]Node{
+		{Name: "Plant4", ItemName: "Loc/Wec/Plant4", HasChildren: true},
+		{Name: "Plant4", HasChildren: true},
+	}, defaultNamer)
+	if len(plants) != 1 || plants[0] != 4 {
+		t.Errorf("plants = %v, want [4]", plants)
+	}
+}
+
+// End to end: a park whose branches carry no item names is still a park.
+func TestTurbinesFindsPlantsWithoutItemNames(t *testing.T) {
+	f := newFakeOPC()
+	f.ParkNo = 4242
+	// No plants via Branches, so Loc/Wec is listed from ExtraNodes alone.
+	f.ExtraNodes = []Node{{Name: "Plant3", HasChildren: true}}
+	f.Branches = map[uint8][]string{3: {"Ctrl", "SetCtrl"}}
+
+	info, err := New(f).Turbines(context.Background())
+	if err != nil {
+		t.Fatalf("Turbines: %v", err)
+	}
+	// Plant 3 appears once, from Branches and from ExtraNodes deduplicated.
+	if len(info.PlantNo) != 1 || info.PlantNo[0] != 3 {
+		t.Fatalf("plants = %v, want [3]", info.PlantNo)
+	}
+	if !info.Ctrl[3] {
+		t.Error("plant 3 was found but its Ctrl function was not")
+	}
+	if len(info.Unsupported) != 0 {
+		t.Errorf("Unsupported = %v, want none", info.Unsupported)
 	}
 }
 

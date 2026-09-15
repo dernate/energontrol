@@ -26,7 +26,7 @@
 //	    }
 //	}
 //
-// Three rules follow from the fact that a wrong "yes" is more dangerous than a
+// Four rules follow from the fact that a wrong "yes" is more dangerous than a
 // "no":
 //
 //   - A plant whose state cannot be established is never reported as being in
@@ -34,7 +34,8 @@
 //     is not good, and a plant in CtrlCommError all mean the state is unknown.
 //   - A plant that cannot be commanded yields OutcomeNotPermitted with a reason,
 //     not a quiet success. Plants stopped by Enercon with higher rights are the
-//     usual case.
+//     usual case; a plant reporting a control state outside the documented set
+//     is another, and is refused rather than guessed at.
 //   - Success is reported only for plants where a value was actually written,
 //     the server confirmed the write, and the session was verified. Reaching the
 //     final session state is not by itself evidence that anything was written.
@@ -42,6 +43,39 @@
 //     session id or a written value cannot be read back, the plant fails with
 //     ErrSessionUnverified rather than being reported as commanded on the
 //     strength of a log warning nobody reads.
+//   - A state that is not as far along as the one requested does not satisfy the
+//     request. An unforced stop tolerates a plant that is more stopped than
+//     asked for, including one Enercon stopped itself, but a plant idling at 60°
+//     is commanded on to 90° instead of being reported as already stopped.
+//
+// # What a plant reports in Ctrl
+//
+// Ctrl carries the value that was set. After SetCtrl 7 the plant reports 7 and
+// holds it; no blade angle is ever reported there. The data sheet describes Ctrl
+// as an operating state, which this package first read as "the plant answers
+// with the blade angle a command produces, 1 or 2, and never with the command
+// value" — that reading is wrong.
+//
+// Two things follow. CtrlValue.Reached is exact equality against the command
+// value, so a plant reporting CtrlStop90 has not carried out a gradient stop at
+// 90°, however its blades stand. And every state a client can have caused (0 to
+// 8) is commandable, so a plant stopped for species protection can be started
+// again.
+//
+// The blade angle a command produces is still what ranks how deep a stop is,
+// which is the separate question an unforced Stop asks.
+//
+// The rule has a counterpart that matters just as much for a control loop:
+// OutcomeFailed does not mean nothing was written. If the procedure fails after
+// the session submit was written and confirmed, the server has the value and
+// has committed it, and only the confirmation that the session wound down is
+// missing. Such a plant carries ErrOutcomeUncertain in addition to the reason
+// it failed. Read the plant's state before retrying — a Stop is protected by
+// the 360 s delay before a new reservation, a Start (0 s) and a Reset are not:
+//
+//	if errors.Is(r.Err, energontrol.ErrOutcomeUncertain) {
+//	    // the command may have taken effect; do not simply send it again
+//	}
 //
 // # A command is not a confirmation that the plant moved
 //
@@ -60,14 +94,20 @@
 //
 //   - Session timeout: 60 s. A session that cannot be completed expires after
 //     this; there is no documented way to abort one earlier. It is the ceiling
-//     on everything a command waits for: every wait inside a session is clamped
-//     to the time left of it, so the per-transition polling budget cannot add
-//     up past the point where the session still exists. A command that runs
-//     into it reports ErrSessionExpired. WithSessionLifetime overrides the
+//     on everything a command waits for once a session exists: every wait
+//     inside a session is clamped to the time left of it, so neither the
+//     per-transition polling budget nor the minimum attempt count can push a
+//     command past the point where the session still exists. A command that
+//     runs into it reports ErrSessionExpired. WithSessionLifetime overrides the
 //     value for an installation that documents a different one.
-//   - The default polling budget is one second per state transition — not per
-//     command, of which there are four. Raise it with WithSessionPolling if a
-//     SCADA needs longer; values above the session lifetime are clamped to it.
+//   - The default polling budget is five seconds per state transition — not per
+//     command, of which there are four. It is a wall-clock deadline and every
+//     attempt is a SOAP round trip, so a slow SCADA gets fewer attempts out of
+//     the same budget; a minimum of four is made regardless. Change it with
+//     WithSessionPolling; values above the session lifetime are clamped to it.
+//   - The wait for a free session happens before any reservation exists and is
+//     therefore not bounded by the session lifetime. WithCommandTimeout bounds
+//     a command as a whole, which is the figure a scheduler can reason about.
 //   - Extension timeout after setting a value: 60 s.
 //   - Delay before a new reservation after a stop: 360 s. A plant that was just
 //     stopped answers "occupied" for six minutes. Do not build a control loop
@@ -99,13 +139,101 @@
 // shows up as an entry in Unsupported rather than as a turbine that quietly does
 // not exist.
 //
+// # The transport
+//
+// The OPC server is reached through the Transport port. The transport for an
+// Enercon SCADA is in the opcxmlda subpackage:
+//
+//	server := &gopcxmlda.Server{Url: u, LocaleID: "en-us", Timeout: 10 * time.Second}
+//	client := energontrol.New(opcxmlda.New(server))
+//
+// The port speaks item names and unsigned integers. Nothing about SOAP, XML or
+// a particular OPC client library reaches past it, and the adapter sits in a
+// package of its own so that this one does not import that library at all —
+// which is what makes the boundary a compile error rather than a code-review
+// item. The port's predecessor was built from the library's own types, and an
+// audit found it leaking.
+//
+// Past the port, three rules live in exactly one place: correlating a response
+// with its request, following a paged browse to its end, and separating what a
+// server said about the request from what it said about one item. See Transport
+// for the contract an implementation has to keep.
+//
 // # Correlating responses
 //
 // Response items are matched to request items by ClientItemHandle, and by
 // ItemName where no handle is returned. Position is never used: OPC XML-DA does
 // not guarantee that a response lists items in request order, and a positional
 // mismatch would apply a command to the wrong turbine. A response that carries
-// neither is rejected with ErrUncorrelatable.
+// neither is rejected with ErrUncorrelatable, and so is one whose handle and
+// item name name different items — the handle is authoritative, but a
+// contradiction is a server fault, and trusting it anyway is the same mistake
+// positional matching was rejected for.
+//
+// # Errors about one item, and errors about the request
+//
+// A read or a write returns one result per item, and a problem with a single
+// item — a fault code, unusable quality, a value of an unexpected type, an item
+// the server did not answer for — is reported in that item's result. One
+// unreadable plant does not blind a caller to the rest of the park, which
+// matters because reading the park is the documented way to monitor it.
+//
+// This is the one place where an OPC XML-DA detail leaks into a safety
+// property, so it is worth stating: a conformant server reports an item fault
+// in the item's ResultID attribute and, since ReturnErrorText defaults to true,
+// adds an Errors element carrying the localised text for it. A client library
+// that reports that element as a failure of the whole request turns one bad
+// item name into a failed read for a whole park — and inside a command into a
+// failed batch with every reserved session left open for the server's 60 s
+// timeout. The transport shipped here therefore classifies such an error as
+// item-level and keeps the response, while a transport failure, a SOAP fault
+// and an Errors element that no returned item accounts for all remain failures
+// of the request.
+//
+// The boundary of the per-item handling is worth stating, because it is a
+// property of the stack rather than of this package. All of the above concerns
+// a response the transport could parse, in which the server reported a problem
+// with a particular item. A response that cannot be parsed at all — a value
+// element without the xsi:type the schema requires, say — fails as a whole:
+// gopcxmlda is deliberately fail-fast about decoding, and that is the right
+// call, because a reply that malformed says nothing trustworthy about any of
+// its items. Salvaging the ones that happened to parse would mean deciding, on
+// a guess, that the rest of the document is still to be believed.
+//
+// # The address space
+//
+// The item names follow the ENERCON technical data sheet: the park number at
+// Loc/LocNo, the plants below Loc/Wec as Loc/Wec/Plant<n>, and the Ctrl and
+// Reset branches below each of those. WithItemRoot points the client at a
+// different root for installations that do not expose their park under "Loc";
+// everything below the root, the "/" included, follows the data sheet and is
+// not configurable.
+//
+// A plant node is only taken into the listing if this package would address it
+// under the name the server itself gave it. A server that names its nodes
+// Plant007 reports plant 7, but a command would go to Loc/Wec/Plant7, an item
+// such a server does not have — so the node is reported in
+// TurbineInfo.Unsupported instead of being listed as though it were usable.
+//
+// # Requesting fresh values
+//
+// A server may answer a read from its cache, and a control decision taken on a
+// stale state is a decision taken on the wrong state. WithMaxStateAge guards
+// against that from both ends.
+//
+// Every read carries the age as the MaxAge attribute OPC XML-DA defines for it,
+// on the request's item list, which obliges the server to fetch a fresh value
+// from the device rather than serve one out of its cache. That prevents a stale
+// value. The item timestamp is then checked against the same limit, which
+// detects one that arrives regardless — from a server that ignores the
+// attribute, say. The second half is why the check is strict about an item that
+// carries no timestamp at all: an age that cannot be established is not an age
+// within the limit.
+//
+// The option is off by default, and with it off no MaxAge is sent at all. The
+// specification reads a MaxAge of 0 as a demand for the most accurate data
+// available, so sending it on behalf of a caller who never asked would turn
+// every read into a device read.
 //
 // # Concurrency
 //
@@ -173,15 +301,18 @@
 //	if errors.Is(err, energontrol.ErrSessionExpired) {
 //	    // the session ran out of its 60 s; a fresh attempt can work
 //	}
+//	if errors.Is(err, energontrol.ErrOutcomeUncertain) {
+//	    // the command was submitted; it may have taken effect
+//	}
 //
 // # Relationship to v1
 //
 // v2 is a breaking release that came out of an audit of v1. The API differences
 // are listed in CHANGELOG.md; the safety-relevant ones are that commands now
-// return []PlantResult instead of ([]bool, []error), that the OPC client is
-// passed as an interface (&server rather than server), and that control values
-// are typed constants rather than entries in a string-keyed map — in v1 a
-// misspelled key silently yielded 0, which is "start".
+// return []PlantResult instead of ([]bool, []error), that the OPC server is
+// reached through the Transport port rather than used directly, and that
+// control values are typed constants rather than entries in a string-keyed map
+// — in v1 a misspelled key silently yielded 0, which is "start".
 //
 // # Reference
 //

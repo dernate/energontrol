@@ -14,9 +14,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # go-version rather than go-version-file, deliberately. go.mod now carries
+      # a toolchain line so that working *in* this module uses a patched
+      # compiler, and setup-go prefers that line over the go line — which would
+      # pin CI to that one patch. What CI should exercise is the newest patch of
+      # the minor the module declares as its minimum, and "1.26.x" with
+      # check-latest does that without anyone editing a file when a patch lands.
+      #
+      # The cost is that the minor is named here as well as in go.mod. It has to
+      # move in both places on a minor bump.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.26.x'
+          check-latest: true
           cache: true
 
       # A library that moves wind turbines does not get to merge unformatted
@@ -40,24 +50,47 @@ jobs:
         run: go vet -tags opc_integration ./...
 
       # golangci-lint rather than staticcheck alone: it bundles staticcheck and
-      # adds errcheck, ineffassign and unused, which caught unchecked
-      # fmt.Sscanf calls in the test fake that standalone staticcheck passes.
+      # adds errcheck, ineffassign and unused, plus the rules .golangci.yml
+      # enables on top — errorlint, nilerr, exhaustive and durationcheck, which
+      # are the four that matter for a package whose contract is its errors and
+      # whose logic is full of timing arithmetic.
+      #
+      # The version is pinned. It used to be "latest", so a green build had
+      # passed whatever rules that day's release enabled by default: a new
+      # release could turn the build red without a line of code changing, and
+      # the v1-to-v2 transition changed both the default set and the
+      # configuration format. Raise this deliberately, with the linter run
+      # once before the bump is merged.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.13.2
           args: --timeout 5m
 
       - name: golangci-lint (live tests)
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.13.2
           args: --timeout 5m --build-tags opc_integration
 
       # -race matters here: the Client serialises commands per plant and browses
       # a park concurrently.
+      # Every package's tests run, but the coverage floor is about the library.
+      #
+      # -coverpkg spans the library packages rather than one at a time, because
+      # a test in one of them legitimately covers code in the other — the
+      # adapter's end-to-end tests drive the core — and without it, moving a
+      # test between packages would drop the total even though nothing got
+      # worse. cmd/ and test/ are left out of the measurement on purpose:
+      # scadaprobe is a tool whose gate is that its own tests pass, and holding
+      # a diagnostic CLI to the library's bar would only invite coverage
+      # theatre. It makes the per-package lines in the log read oddly; the gate
+      # below reads the merged total, which is the figure that means something.
       - name: go test -race
-        run: go test -race -count=1 -coverprofile=cover.out ./...
+        run: |
+          libs="$(go list ./... | grep -vE '/cmd/|/test$' | paste -sd,)"
+          echo "measuring coverage of: ${libs}"
+          go test -race -count=1 -coverpkg="$libs" -coverprofile=cover.out ./...
 
       - name: coverage floor
         run: |
@@ -65,7 +98,7 @@ jobs:
           echo "total coverage: ${total}%"
           # Raise the floor when it is comfortably exceeded; never lower it to
           # make a build pass.
-          awk -v t="$total" 'BEGIN { exit (t >= 85.0) ? 0 : 1 }' || {
-            echo "coverage ${total}% is below the 85% floor"
+          awk -v t="$total" 'BEGIN { exit (t >= 88.0) ? 0 : 1 }' || {
+            echo "coverage ${total}% is below the 88% floor"
             exit 1
           }

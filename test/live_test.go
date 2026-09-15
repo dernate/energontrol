@@ -17,11 +17,19 @@
 // Every test verifies the park number before it sends anything, so a set of
 // credentials pointed at the wrong park stops the run instead of commanding
 // somebody else's turbines.
+//
+// The suite lives in a package of its own, which has two consequences worth
+// having. Tests that move real machinery are physically separated from the ones
+// that do not. And only the exported API is reachable from here, so the suite
+// doubles as a standing check that what the library exports is enough to run a
+// park with — the same question doc_test.go asks against a fake, asked against
+// real turbines.
 
-package energontrol
+package live
 
 import (
 	"context"
+	"log/slog"
 	"net/url"
 	"os"
 	"strconv"
@@ -29,12 +37,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dernate/energontrol/v2"
+	"github.com/dernate/energontrol/v2/opcxmlda"
 	"github.com/dernate/gopcxmlda"
 	"github.com/joho/godotenv"
 )
 
 type liveEnv struct {
-	client *Client
+	client *energontrol.Client
 	server *gopcxmlda.Server
 	userID uint64
 	parkNo uint64
@@ -60,7 +70,9 @@ func requireLive(t *testing.T, commanding bool) liveEnv {
 	server := &gopcxmlda.Server{Url: parsed, LocaleID: "en-us", Timeout: 10 * time.Second}
 
 	env := liveEnv{
-		client: New(server, WithLogger(testLogger(t)), WithMaxStateAge(60*time.Second)),
+		client: energontrol.New(opcxmlda.New(server),
+			energontrol.WithLogger(testLogger(t)),
+			energontrol.WithMaxStateAge(60*time.Second)),
 		server: server,
 	}
 	if v := os.Getenv("USERID"); v != "" {
@@ -178,7 +190,7 @@ func TestLiveStopThenStart(t *testing.T) {
 	t.Cleanup(func() {
 		// Put every plant back the way it was found.
 		for _, s := range before {
-			if s.Err != nil || s.Ctrl != CtrlStart {
+			if s.Err != nil || s.Ctrl != energontrol.CtrlStart {
 				continue
 			}
 			if _, err := env.client.Start(context.Background(), env.userID, s.PlantNo); err != nil {
@@ -197,7 +209,7 @@ func TestLiveStopThenStart(t *testing.T) {
 			t.Errorf("plant %d did not stop: %v", r.PlantNo, r.Err)
 		}
 	}
-	assertCtrlState(t, env, CtrlStop90)
+	assertCtrlState(t, env, energontrol.CtrlStop90)
 
 	started, err := env.client.Start(ctx, env.userID, env.plants...)
 	if err != nil {
@@ -252,7 +264,7 @@ func TestLiveReset(t *testing.T) {
 // This is the monitoring loop the package documentation prescribes: reaching
 // the end of a session is not evidence that the turbine moved, so the state has
 // to be polled until it reports what was asked for.
-func assertCtrlState(t *testing.T, env liveEnv, want CtrlValue) {
+func assertCtrlState(t *testing.T, env liveEnv, want energontrol.CtrlValue) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for {
@@ -278,4 +290,16 @@ func assertCtrlState(t *testing.T, env liveEnv, want CtrlValue) {
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// testLogger routes the package's log output into the test log.
+func testLogger(t *testing.T) *slog.Logger {
+	return slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+type testWriter struct{ t *testing.T }
+
+func (w testWriter) Write(p []byte) (int, error) {
+	w.t.Logf("%s", p)
+	return len(p), nil
 }

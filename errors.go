@@ -29,6 +29,11 @@ var (
 	// word Enercon defines for it. It is an argument error and is reported
 	// before anything is sent to the server.
 	ErrInvalidUserID = errors.New("energontrol: user id does not fit in a long word")
+	// ErrInvalidOption is returned by NewWithOptions when an option was given a
+	// value that cannot be used — a non-positive polling interval, say. An
+	// option that silently discarded such a value would turn a configuration
+	// mistake into a client that quietly runs on defaults.
+	ErrInvalidOption = errors.New("energontrol: invalid option")
 
 	// ErrServerNotRunning is returned when the OPC server answers but reports a
 	// ServerState other than "running".
@@ -55,8 +60,22 @@ var (
 	ErrUnexpectedType = errors.New("energontrol: unexpected OPC value type")
 	// ErrUncorrelatable is returned when a response cannot be matched to the
 	// request. Positional matching is deliberately not attempted, because a wrong
-	// match would apply a command to the wrong turbine.
+	// match would apply a command to the wrong turbine. It also covers a
+	// response in which the ClientItemHandle and the ItemName of one item name
+	// different items: the handle is authoritative, but a contradiction is a
+	// server fault, and trusting it anyway is the mistake positional matching
+	// was rejected for.
 	ErrUncorrelatable = errors.New("energontrol: response item cannot be correlated with the request")
+
+	// ErrBrowseIncomplete is returned when a browse listing could not be
+	// completed — a server that announces more elements without handing out a
+	// continuation point, that repeats one, or that never finishes paging.
+	//
+	// It is an error rather than a shorter listing because a plant missing from
+	// a park listing is never commanded and never monitored, so a partial
+	// listing that passes for a complete one is the more dangerous of the two
+	// ways to be wrong.
+	ErrBrowseIncomplete = errors.New("energontrol: browse listing is incomplete")
 
 	// ErrPlantUnderEnerconControl is returned for plants in CtrlStop60Enercon or
 	// CtrlStopEnercon. The plant was stopped with higher rights and cannot be
@@ -66,6 +85,17 @@ var (
 	// state of the plant is unknown; it is neither known to run nor known to be
 	// stopped.
 	ErrPlantCommunication = errors.New("energontrol: plant communication error, plant state unknown")
+	// ErrPlantStateUnknown is returned for a plant whose Ctrl value is not one
+	// this package knows. Enercon documents 0, 1, 2, 121, 129, 130 and 255 for
+	// that item; a value outside that set has been observed on a real park (137),
+	// so it is a state to report rather than a case to assume away.
+	//
+	// The plant is not commanded: an unknown state carries no information about
+	// where the blades are or who holds control, so neither the target-state
+	// comparison nor the rights check can be carried out. The message names the
+	// raw value, which is what can be looked up in the data sheet for the
+	// controller type.
+	ErrPlantStateUnknown = errors.New("energontrol: plant reports a control state this package does not know")
 
 	// ErrSessionState is returned when a control session does not reach the state
 	// the protocol requires. More specific session errors below wrap it.
@@ -120,6 +150,19 @@ var (
 	// ErrRbhUnavailable is returned for plants that report no rotor blade
 	// heating, that is, whose heating status word has the "installed" bit clear.
 	ErrRbhUnavailable = errors.New("energontrol: rotor blade heating is not available on this plant")
+
+	// ErrOutcomeUncertain is attached to a plant result when the session submit
+	// was written and confirmed by the server, but the session did not reach
+	// its final state — so the command may well have taken effect even though
+	// the plant is reported as failed.
+	//
+	// It exists because OutcomeFailed does not mean "nothing was written", and
+	// a control loop that retries on failure would otherwise send a second
+	// command to a plant that already had one. A Stop is protected by the 360 s
+	// delay before a new reservation; a Start (0 s) and a Reset are not. Read
+	// the plant's state before deciding what to do.
+	ErrOutcomeUncertain = errors.New(
+		"energontrol: the command was submitted but its completion is unconfirmed")
 
 	// ErrSessionLeftOpen is attached to a plant result when a control session was
 	// reserved but the procedure could not complete and no release mechanism is

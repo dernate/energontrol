@@ -1,17 +1,11 @@
 package energontrol
 
+// The package-level convenience wrappers, which build a default Client.
+
 import (
 	"context"
 	"testing"
 )
-
-// The package-level wrappers were never called by a test, so a wrong or
-// forgotten argument in one of them would have gone unnoticed — they are
-// trivial, which is exactly why nobody looks at them twice.
-//
-// Each case here calls the wrapper and asserts the observable effect the
-// corresponding method has, so a wrapper that drops a parameter or calls the
-// wrong method fails.
 
 func TestPackageLevelCommandWrappers(t *testing.T) {
 	ctx := context.Background()
@@ -200,49 +194,5 @@ func TestPackageLevelReadWrappers(t *testing.T) {
 	match, err := ParkNoMatch(ctx, f, 4242, true)
 	if err != nil || !match {
 		t.Errorf("ParkNoMatch = %t, %v", match, err)
-	}
-}
-
-// The state slices carry their own aggregate helpers, so a caller who wants the
-// old all-or-nothing behaviour has one call for it.
-func TestStateSliceHelpers(t *testing.T) {
-	f := newFakeOPC()
-	f.Ctrl[2] = uint64(CtrlStop90)
-	f.Ctrl[5] = uint64(CtrlStart)
-	f.ItemFault[ctrlItem(5)] = "E_UNKNOWN_ITEM_NAME"
-
-	states, err := New(f).PlantCtrlState(context.Background(), 2, 5)
-	if err != nil {
-		t.Fatalf("PlantCtrlState: %v", err)
-	}
-	if len(states) != 2 {
-		t.Fatalf("got %d states for 2 plants", len(states))
-	}
-	// The readable plant is still readable.
-	got, ok := states.Get(2)
-	if !ok || got.Err != nil || got.Ctrl != CtrlStop90 {
-		t.Errorf("plant 2 = %v (ok=%t), want %s", got, ok, CtrlStop90)
-	}
-	// The unreadable one carries its reason rather than a state.
-	got, ok = states.Get(5)
-	if !ok || got.Err == nil {
-		t.Errorf("plant 5 = %v (ok=%t), want an error", got, ok)
-	}
-	if _, ok := states.Get(9); ok {
-		t.Error("Get returned a plant that was never requested")
-	}
-	if states.Err() == nil {
-		t.Error("Err() should surface the unreadable plant")
-	}
-
-	// And with every plant readable, Err is nil.
-	f2 := newFakeOPC()
-	f2.Ctrl[2] = uint64(CtrlStop90)
-	clean, err := New(f2).PlantCtrlState(context.Background(), 2)
-	if err != nil {
-		t.Fatalf("PlantCtrlState: %v", err)
-	}
-	if clean.Err() != nil {
-		t.Errorf("Err() = %v, want nil", clean.Err())
 	}
 }

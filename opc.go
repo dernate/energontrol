@@ -5,70 +5,75 @@ import (
 	"fmt"
 	"math"
 	"strings"
-
-	"github.com/dernate/gopcxmlda"
 )
 
-// OPC XML-DA request option names. These are XML attribute names and therefore
-// case sensitive; v1 sent "returnItemName", which a conformant server ignores as
-// an unknown attribute — which in turn made ItemName unavailable for correlating
-// responses.
-const (
-	optReturnItemName  = "ReturnItemName"
-	optReturnItemTime  = "ReturnItemTime"
-	optReturnItemPath  = "ReturnItemPath"
-	optReturnErrorText = "ReturnErrorText"
-)
+// defaultItemRoot is the root of the address space the ENERCON technical data
+// sheet documents: the park number sits at Loc/LocNo, the plants below Loc/Wec.
+const defaultItemRoot = "Loc"
 
-func readOptions() map[string]interface{} {
-	return map[string]interface{}{
-		optReturnItemName:  true,
-		optReturnItemTime:  true,
-		optReturnErrorText: true,
-	}
-}
+// itemNamer builds the OPC item names of one address space.
+//
+// Keeping every name in one place makes the address space of the SCADA visible
+// at a glance and keeps the format strings out of the logic. Carrying the root
+// as a field rather than hardcoding it is what lets WithItemRoot exist: the
+// separator and the branch names below the root are Enercon's own and follow
+// the data sheet, but which branch a park hangs off is an installation's
+// choice, and a package that assumes one answers nothing on an installation
+// that made the other.
+type itemNamer struct{ root string }
 
-func writeOptions() map[string]interface{} {
-	return map[string]interface{}{
-		optReturnItemName:  true,
-		optReturnItemPath:  true,
-		optReturnErrorText: true,
-	}
-}
+// plantElementName is the browse element name of a plant, and therefore also
+// the last path segment of every item name below it.
+func plantElementName(plant uint8) string { return fmt.Sprintf("Plant%d", plant) }
 
-// Item name builders. Keeping them in one place makes the address space of the
-// SCADA visible at a glance and keeps the format strings out of the logic.
+func (n itemNamer) parkNo() string     { return n.root + "/LocNo" }
+func (n itemNamer) parkBranch() string { return n.root + "/Wec" }
 
-func ctrlItem(plant uint8) string { return fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/Ctrl", plant) }
-func rbhItem(plant uint8) string  { return fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/Rbh", plant) }
-func setCtrlItem(plant uint8) string {
-	return fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/SetCtrl", plant)
-}
-func setRbhItem(plant uint8) string { return fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/SetRbh", plant) }
-func iceDetItem(plant uint8) string { return fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/IceDet", plant) }
-func setIceDetItem(plant uint8) string {
-	return fmt.Sprintf("Loc/Wec/Plant%d/Ctrl/SetIceDet", plant)
-}
-func setResetItem(plant uint8) string {
-	return fmt.Sprintf("Loc/Wec/Plant%d/Reset/SetReset", plant)
-}
-func sessionStateItem(plant uint8, kind SessionKind) string {
-	return fmt.Sprintf("Loc/Wec/Plant%d/%s/SessionState", plant, kind)
-}
-func sessionRequestItem(plant uint8, kind SessionKind) string {
-	return fmt.Sprintf("Loc/Wec/Plant%d/%s/SessionRequest", plant, kind)
-}
-func sessionPubKeyItem(plant uint8, kind SessionKind) string {
-	return fmt.Sprintf("Loc/Wec/Plant%d/%s/SessionPubKey", plant, kind)
-}
-func sessionSubmitItem(plant uint8, kind SessionKind) string {
-	return fmt.Sprintf("Loc/Wec/Plant%d/%s/SessionSubmit", plant, kind)
-}
-func sessionTimeoutItem(plant uint8, kind SessionKind) string {
-	return fmt.Sprintf("Loc/Wec/Plant%d/%s/SessionTimeOut", plant, kind)
+func (n itemNamer) plantBranch(plant uint8) string {
+	return n.parkBranch() + "/" + plantElementName(plant)
 }
 
-const parkNoItem = "Loc/LocNo"
+func (n itemNamer) plantSubBranch(plant uint8, kind SessionKind) string {
+	return fmt.Sprintf("%s/%s", n.plantBranch(plant), kind)
+}
+
+func (n itemNamer) ctrl(plant uint8) string {
+	return n.plantSubBranch(plant, SessionCtrl) + "/Ctrl"
+}
+func (n itemNamer) rbh(plant uint8) string {
+	return n.plantSubBranch(plant, SessionCtrl) + "/Rbh"
+}
+func (n itemNamer) iceDet(plant uint8) string {
+	return n.plantSubBranch(plant, SessionCtrl) + "/IceDet"
+}
+func (n itemNamer) setCtrl(plant uint8) string {
+	return n.plantSubBranch(plant, SessionCtrl) + "/SetCtrl"
+}
+func (n itemNamer) setRbh(plant uint8) string {
+	return n.plantSubBranch(plant, SessionCtrl) + "/SetRbh"
+}
+func (n itemNamer) setIceDet(plant uint8) string {
+	return n.plantSubBranch(plant, SessionCtrl) + "/SetIceDet"
+}
+func (n itemNamer) setReset(plant uint8) string {
+	return n.plantSubBranch(plant, SessionReset) + "/SetReset"
+}
+
+func (n itemNamer) sessionState(plant uint8, kind SessionKind) string {
+	return n.plantSubBranch(plant, kind) + "/SessionState"
+}
+func (n itemNamer) sessionRequest(plant uint8, kind SessionKind) string {
+	return n.plantSubBranch(plant, kind) + "/SessionRequest"
+}
+func (n itemNamer) sessionPubKey(plant uint8, kind SessionKind) string {
+	return n.plantSubBranch(plant, kind) + "/SessionPubKey"
+}
+func (n itemNamer) sessionSubmit(plant uint8, kind SessionKind) string {
+	return n.plantSubBranch(plant, kind) + "/SessionSubmit"
+}
+func (n itemNamer) sessionTimeout(plant uint8, kind SessionKind) string {
+	return n.plantSubBranch(plant, kind) + "/SessionTimeOut"
+}
 
 // itemValue is the per-item outcome of a batched read: either a value or the
 // reason this particular item is unusable.
@@ -77,27 +82,27 @@ type itemValue struct {
 	Err   error
 }
 
-// readValues reads the named items in a single request and returns one entry per
-// requested name.
+// readValues reads the named items in a single request and returns one entry
+// per requested name.
 //
 // The returned error is non-nil only for failures that affect the whole request
-// — transport, SOAP fault, or a response that cannot be correlated. A problem
-// with a single item (missing, faulted, bad quality, unexpected type) is
-// reported in that item's entry, so one broken plant does not fail a command for
-// a whole park.
+// — transport, SOAP fault, a server that is not running, or a response that
+// cannot be correlated. A problem with a single item (missing, faulted, bad
+// quality, unexpected type) is reported in that item's entry, so one broken
+// plant does not fail a command for a whole park.
 func (c *Client) readValues(ctx context.Context, names []string) (map[string]itemValue, error) {
-	byName, err := c.readItems(ctx, names)
+	results, err := c.readItems(ctx, names)
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]itemValue, len(names))
 	for _, n := range names {
-		it, ok := byName[n]
+		r, ok := results[n]
 		if !ok {
 			out[n] = itemValue{Err: &ItemError{ItemName: n, Reason: ErrItemMissing}}
 			continue
 		}
-		v, err := c.itemUint64(it, n)
+		v, err := c.scalarOf(r)
 		out[n] = itemValue{Value: v, Err: err}
 	}
 	return out, nil
@@ -111,45 +116,133 @@ type arrayValue struct {
 	Err    error
 }
 
-// readArrays reads array items in a single request, with the same validation and
-// correlation rules as readValues.
+// readArrays reads array items in a single request, with the same validation
+// and correlation rules as readValues.
 func (c *Client) readArrays(ctx context.Context, names []string) (map[string]arrayValue, error) {
-	byName, err := c.readItems(ctx, names)
+	results, err := c.readItems(ctx, names)
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]arrayValue, len(names))
 	for _, n := range names {
-		it, ok := byName[n]
+		r, ok := results[n]
 		if !ok {
 			out[n] = arrayValue{Err: &ItemError{ItemName: n, Reason: ErrItemMissing}}
 			continue
 		}
-		v, err := c.itemUint64Slice(it, n)
-		out[n] = arrayValue{Values: v, Err: err}
+		if err := c.usable(r); err != nil {
+			out[n] = arrayValue{Err: err}
+			continue
+		}
+		out[n] = arrayValue{Values: r.Values}
 	}
 	return out, nil
 }
 
-// readItems performs one batched read and correlates the response.
-func (c *Client) readItems(ctx context.Context, names []string) (map[string]gopcxmlda.TItem, error) {
+// readItems performs one batched read, honours the ServerState the response
+// carries, and indexes the results by item name.
+func (c *Client) readItems(ctx context.Context, names []string) (map[string]ItemResult, error) {
 	if len(names) == 0 {
-		return map[string]gopcxmlda.TItem{}, nil
+		return map[string]ItemResult{}, nil
 	}
-	items := make([]gopcxmlda.TItem, len(names))
-	for i, n := range names {
-		items[i] = gopcxmlda.TItem{ItemName: n}
-	}
-	var requestHandle string
-	var itemHandles []string
-	resp, err := c.opc.Read(ctx, items, &requestHandle, &itemHandles, "", readOptions())
+	// Every read this package makes carries the same freshness requirement, the
+	// session items included — a stale SessionState is the most dangerous of
+	// them all.
+	resp, err := c.transport.Read(ctx, names, ReadOptions{MaxAge: c.maxStateAge})
 	if err != nil {
-		return nil, wrapf(err, "read %d item(s)", len(names))
-	}
-	if err := requireRunning(resp.Response.Result.ServerState); err != nil {
 		return nil, err
 	}
-	return correlate(names, itemHandles, resp.Response.ItemList.Items)
+	if err := requireRunning(resp.ServerState); err != nil {
+		return nil, err
+	}
+	return resultsByName(names, resp.Items)
+}
+
+// resultsByName indexes a transport's results by item name.
+//
+// It is this package's own check on the Transport contract: at most one result
+// per requested name, and nothing that was not requested. The adapter shipped
+// here correlates responses properly, but a Transport is part of the public API
+// and a caller may supply one — and a transport that gets this wrong would
+// otherwise attribute one plant's value to another, which is the failure this
+// package refuses to be capable of.
+func resultsByName(names []string, items []ItemResult) (map[string]ItemResult, error) {
+	requested := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		requested[n] = struct{}{}
+	}
+	out := make(map[string]ItemResult, len(items))
+	for _, it := range items {
+		if _, ok := requested[it.Name]; !ok {
+			return nil, fmt.Errorf("%w: the transport returned item %q, which was not requested",
+				ErrUncorrelatable, it.Name)
+		}
+		if _, dup := out[it.Name]; dup {
+			return nil, fmt.Errorf("%w: item %q returned more than once", ErrUncorrelatable, it.Name)
+		}
+		out[it.Name] = it
+	}
+	return out, nil
+}
+
+// scalarOf validates one result and returns its value as a single number.
+//
+// An item that carries no value, or more than one, is rejected rather than
+// read leniently: every item read this way is a scalar on an Enercon SCADA, and
+// a value of an unexpected shape means the item is not what this package
+// thinks it is.
+func (c *Client) scalarOf(r ItemResult) (uint64, error) {
+	if err := c.usable(r); err != nil {
+		return 0, err
+	}
+	if len(r.Values) != 1 {
+		return 0, &ItemError{ItemName: r.Name, Reason: ErrUnexpectedType,
+			Detail: fmt.Sprintf("expected a single value, got %d", len(r.Values))}
+	}
+	return r.Values[0], nil
+}
+
+// usable applies the checks that must pass before an item's value may be used
+// at all: the transport could decode it, the server reported no fault for it,
+// its quality permits use, and it is not stale.
+//
+// v1 read a value straight through an unchecked type assertion and ignored both
+// the item's ResultID and its quality, so a value the server had explicitly
+// marked as bad was used as a process value — and a value of an unexpected OPC
+// type panicked the calling application.
+func (c *Client) usable(r ItemResult) error {
+	if r.Err != nil {
+		return r.Err
+	}
+	if r.ResultID != "" {
+		return &ItemError{ItemName: r.Name, Reason: ErrItemFault, Detail: r.ResultID}
+	}
+	if !qualityUsable(r.Quality) {
+		return &ItemError{ItemName: r.Name, Reason: ErrBadQuality, Detail: "quality=" + r.Quality}
+	}
+	if c.maxStateAge > 0 {
+		// A maximum age is an explicit requirement, and it cannot be met by an
+		// item whose age is unknown. Skipping the check here would disable the
+		// caller's safety net precisely on the servers it was asked for: one
+		// that answers from a cache is more likely, not less, to be one that
+		// does not support ReturnItemTime.
+		if r.Timestamp.IsZero() {
+			return &ItemError{ItemName: r.Name, Reason: ErrNoItemTime}
+		}
+		if age := c.now().Sub(r.Timestamp); age > c.maxStateAge {
+			return &ItemError{ItemName: r.Name, Reason: ErrStaleValue,
+				Detail: fmt.Sprintf("age %s exceeds %s", age.Round(0), c.maxStateAge)}
+		}
+	}
+	return nil
+}
+
+// qualityUsable reports whether an OPC quality field permits using the value.
+// An empty field means the server did not report quality, which the
+// specification defines as good. Everything in the "good…" family is usable;
+// "uncertain…" and "bad…" are not.
+func qualityUsable(q string) bool {
+	return q == "" || strings.HasPrefix(q, "good")
 }
 
 // requireRunning checks the ServerState that OPC XML-DA carries in the reply
@@ -172,17 +265,6 @@ func requireRunning(state string) error {
 // control command.
 const serverStateRunning = "running"
 
-// writeItem is one item of a batched write.
-//
-// Enercon types every writable array item as an array of long words, so the
-// elements are 32 bit. Writing them as []uint32 makes gopcxmlda emit
-// ArrayOfUnsignedInt (xsd:unsignedInt, 32 bit); v1 wrote []uint64, which emits
-// ArrayOfUnsignedLong (xsd:unsignedLong, 64 bit) and does not match the item.
-type writeItem struct {
-	Name  string
-	Value []uint32
-}
-
 // longWord narrows a value to the 32 bits an Enercon long word holds.
 func longWord(v uint64, what string) (uint32, error) {
 	if v > math.MaxUint32 {
@@ -204,245 +286,45 @@ func longWord(v uint64, what string) (uint32, error) {
 // The earlier behaviour treated a missing item as accepted, on the grounds that
 // a top-level fault would have surfaced as the returned error. That argument
 // does not cover the case it needs to: a server that answers successfully but
-// omits one item from the list. WithLenientVerification restores it for servers
-// that genuinely do not echo written items.
-func (c *Client) writeValues(ctx context.Context, items []writeItem) (map[string]error, error) {
+// omits one item from the list. WithLenientWriteConfirmation restores it for
+// servers that genuinely do not echo written items.
+func (c *Client) writeValues(ctx context.Context, items []ItemWrite) (map[string]error, error) {
 	if len(items) == 0 {
 		return map[string]error{}, nil
 	}
 	names := make([]string, len(items))
-	opcItems := make([]gopcxmlda.TItem, len(items))
 	for i, it := range items {
 		names[i] = it.Name
-		opcItems[i] = gopcxmlda.TItem{
-			ItemName: it.Name,
-			Value:    gopcxmlda.TValue{Value: it.Value},
-		}
 	}
-	var requestHandle string
-	var itemHandles []string
-	resp, err := c.opc.Write(ctx, opcItems, &requestHandle, &itemHandles, "", writeOptions())
+	resp, err := c.transport.Write(ctx, items)
 	if err != nil {
-		return nil, wrapf(err, "write %d item(s)", len(items))
-	}
-	if err := requireRunning(resp.Response.Result.ServerState); err != nil {
 		return nil, err
 	}
-	byName, err := correlate(names, itemHandles, resp.Response.ItemList.Items)
+	if err := requireRunning(resp.ServerState); err != nil {
+		return nil, err
+	}
+	results, err := resultsByName(names, resp.Items)
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]error, len(names))
 	for _, n := range names {
-		it, ok := byName[n]
-		if !ok {
-			if c.lenientVerification {
-				out[n] = nil
-				continue
-			}
+		r, ok := results[n]
+		switch {
+		case !ok && c.lenientWriteConfirmation:
+			out[n] = nil
+		case !ok:
 			out[n] = &ItemError{ItemName: n, Reason: ErrItemMissing,
 				Detail: "the server did not confirm the write"}
-			continue
+		case r.Err != nil:
+			out[n] = r.Err
+		case r.ResultID != "":
+			out[n] = &ItemError{ItemName: n, Reason: ErrItemFault, Detail: r.ResultID}
+		default:
+			out[n] = nil
 		}
-		if it.Error != "" {
-			out[n] = &ItemError{ItemName: n, Reason: ErrItemFault, Detail: it.Error}
-			continue
-		}
-		out[n] = nil
 	}
 	return out, nil
-}
-
-// correlate matches response items to the requested item names.
-//
-// Matching is by ClientItemHandle first — the mechanism OPC XML-DA defines for
-// exactly this purpose — and by ItemName second. Position is never used: the
-// specification does not guarantee that a response lists items in request order,
-// and a positional mismatch would apply a command to the wrong turbine. v1
-// matched by position throughout, so a response that omitted one item silently
-// produced CtrlState 0 ("running") for a plant whose state was in fact unknown.
-func correlate(names, handles []string, items []gopcxmlda.TItem) (map[string]gopcxmlda.TItem, error) {
-	handleToName := make(map[string]string, len(handles))
-	for i, h := range handles {
-		if h != "" && i < len(names) {
-			handleToName[h] = names[i]
-		}
-	}
-	requested := make(map[string]struct{}, len(names))
-	for _, n := range names {
-		requested[n] = struct{}{}
-	}
-	out := make(map[string]gopcxmlda.TItem, len(items))
-	for _, it := range items {
-		name, ok := handleToName[it.ClientItemHandle]
-		if !ok {
-			if _, isRequested := requested[it.ItemName]; isRequested {
-				name = it.ItemName
-			} else {
-				return nil, fmt.Errorf("%w: ClientItemHandle=%q ItemName=%q",
-					ErrUncorrelatable, it.ClientItemHandle, it.ItemName)
-			}
-		}
-		if _, dup := out[name]; dup {
-			return nil, fmt.Errorf("%w: item %q returned more than once", ErrUncorrelatable, name)
-		}
-		out[name] = it
-	}
-	return out, nil
-}
-
-// itemUint64 validates a single response item and converts its value.
-//
-// v1 read the value straight through an unchecked type assertion and ignored
-// both the item's ResultID and its quality, so a value the server had explicitly
-// marked as bad was used as a process value — and a value of an unexpected OPC
-// type panicked the calling application.
-func (c *Client) itemUint64(it gopcxmlda.TItem, name string) (uint64, error) {
-	if err := c.itemUsable(it, name); err != nil {
-		return 0, err
-	}
-	v, err := toUint64(it.Value.Value)
-	if err != nil {
-		return 0, &ItemError{ItemName: name, Reason: ErrUnexpectedType, Detail: err.Error()}
-	}
-	return v, nil
-}
-
-// itemUsable applies the checks that must pass before an item's value may be
-// used at all: no fault code, usable quality, and not stale.
-func (c *Client) itemUsable(it gopcxmlda.TItem, name string) error {
-	if it.Error != "" {
-		return &ItemError{ItemName: name, Reason: ErrItemFault, Detail: it.Error}
-	}
-	if q := it.Quality.QualityField; !qualityUsable(q) {
-		return &ItemError{ItemName: name, Reason: ErrBadQuality, Detail: "quality=" + q}
-	}
-	if c.maxStateAge > 0 {
-		// A maximum age is an explicit requirement, and it cannot be met by an
-		// item whose age is unknown. Skipping the check here would disable the
-		// caller's safety net precisely on the servers it was asked for: one
-		// that answers from a cache is more likely, not less, to be one that
-		// does not support ReturnItemTime.
-		if it.Timestamp.IsZero() {
-			return &ItemError{ItemName: name, Reason: ErrNoItemTime}
-		}
-		if age := c.now().Sub(it.Timestamp); age > c.maxStateAge {
-			return &ItemError{ItemName: name, Reason: ErrStaleValue,
-				Detail: fmt.Sprintf("age %s exceeds %s", age.Round(0), c.maxStateAge)}
-		}
-	}
-	return nil
-}
-
-// itemUint64Slice validates a response item and converts its array value.
-func (c *Client) itemUint64Slice(it gopcxmlda.TItem, name string) ([]uint64, error) {
-	if err := c.itemUsable(it, name); err != nil {
-		return nil, err
-	}
-	v, err := toUint64Slice(it.Value.Value)
-	if err != nil {
-		return nil, &ItemError{ItemName: name, Reason: ErrUnexpectedType, Detail: err.Error()}
-	}
-	return v, nil
-}
-
-// toUint64Slice accepts the shapes gopcxmlda produces for an ArrayOf… value.
-//
-// A bare scalar is accepted as a one-element array: a server is free to type a
-// single value as a scalar, and the checks that read these items back only look
-// at the first element. Rejecting that shape would turn a server's encoding
-// choice into an unverifiable session.
-func toUint64Slice(v any) ([]uint64, error) {
-	switch a := v.(type) {
-	case []interface{}:
-		out := make([]uint64, 0, len(a))
-		for i, e := range a {
-			n, err := toUint64(e)
-			if err != nil {
-				return nil, fmt.Errorf("element %d: %w", i, err)
-			}
-			out = append(out, n)
-		}
-		return out, nil
-	case []uint64:
-		return a, nil
-	case nil:
-		return nil, fmt.Errorf("item carries no value")
-	default:
-		n, err := toUint64(v)
-		if err != nil {
-			return nil, fmt.Errorf("cannot use %T as an array of unsigned integers", v)
-		}
-		return []uint64{n}, nil
-	}
-}
-
-// qualityUsable reports whether an OPC quality field permits using the value.
-// An empty field means the server did not report quality, which the
-// specification defines as good. Everything in the "good…" family is usable;
-// "uncertain…" and "bad…" are not.
-func qualityUsable(q string) bool {
-	return q == "" || strings.HasPrefix(q, "good")
-}
-
-// toUint64 accepts every numeric type gopcxmlda can decode from an OPC value.
-// Which Go type an item's value carries depends on the xsi:type the server
-// chose, not on what the client expects, so pinning it to one type — as v1 did
-// with .(uint64) and .(uint16) — makes the caller's process depend on a server
-// implementation detail.
-func toUint64(v any) (uint64, error) {
-	switch n := v.(type) {
-	case uint64:
-		return n, nil
-	case uint32:
-		return uint64(n), nil
-	case uint16:
-		return uint64(n), nil
-	case uint8:
-		return uint64(n), nil
-	case uint:
-		return uint64(n), nil
-	case int:
-		return fromInt64(int64(n))
-	case int64:
-		return fromInt64(n)
-	case int32:
-		return fromInt64(int64(n))
-	case int16:
-		return fromInt64(int64(n))
-	case int8:
-		return fromInt64(int64(n))
-	case float64:
-		return fromFloat64(n)
-	case float32:
-		return fromFloat64(float64(n))
-	case nil:
-		return 0, fmt.Errorf("item carries no value")
-	default:
-		return 0, fmt.Errorf("cannot use %T as an unsigned integer", v)
-	}
-}
-
-func fromInt64(n int64) (uint64, error) {
-	if n < 0 {
-		return 0, fmt.Errorf("negative value %d", n)
-	}
-	return uint64(n), nil
-}
-
-func fromFloat64(f float64) (uint64, error) {
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0, fmt.Errorf("value %v is not a number", f)
-	}
-	if f < 0 || f > math.MaxUint64 || f != math.Trunc(f) {
-		return 0, fmt.Errorf("value %v is not a non-negative integer", f)
-	}
-	return uint64(f), nil
-}
-
-// wrapf prefixes an error from the OPC layer with what this package was doing.
-func wrapf(err error, format string, args ...any) error {
-	return fmt.Errorf("energontrol: %s: %w", fmt.Sprintf(format, args...), err)
 }
 
 // ctxErr reports a cancelled context. It is checked when a command is entered

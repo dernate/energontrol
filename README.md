@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/dernate/energontrol/v2"
+	"github.com/dernate/energontrol/v2/opcxmlda"
 	"github.com/dernate/gopcxmlda"
 )
 
@@ -44,7 +45,9 @@ func main() {
 		Timeout:  10 * time.Second, // a time.Duration — plain 10 means 10ns
 	}
 
-	client := energontrol.New(server)
+	// The OPC server is reached through the Transport port; opcxmlda is the
+	// transport for an Enercon SCADA. See *The transport* below.
+	client := energontrol.New(opcxmlda.New(server))
 
 	const userID = 1234
 	res, err := client.Stop(context.Background(), userID, true, false, 2, 4)
@@ -62,7 +65,7 @@ func main() {
 ```
 
 Each command is also available as a package-level function that builds a client
-with default settings: `energontrol.Stop(ctx, server, userID, true, false, 2, 4)`.
+with default settings: `energontrol.Stop(ctx, transport, userID, true, false, 2, 4)`.
 
 ## Reading a result
 
@@ -79,6 +82,13 @@ matched by position.
 
 Use `PlantResult.InRequestedState()` rather than `Err == nil` to decide whether a
 setpoint was reached — it is true for the first two outcomes only.
+
+`OutcomeFailed` does **not** mean nothing was written. If the procedure fails
+after the session submit was written and confirmed, the server has committed the
+value and only the confirmation that the session wound down is missing. Such a
+plant additionally carries `ErrOutcomeUncertain`; read its state before
+retrying, because a `Start` (0 s re-reservation delay) and a `Reset` are not
+protected by the 360 s delay that follows a `Stop`.
 
 `Results.InRequestedState()` and `Results.Err()` answer the same questions for a
 whole batch.
@@ -100,18 +110,48 @@ answer where that is what a caller wants.
 - A plant in `CtrlCommError` has an **unknown** state. It is never reported as
   running and never as stopped: `OutcomeNotPermitted` with
   `ErrPlantCommunication`.
+- A plant reporting a `Ctrl` value outside the set this package knows (0 to 8,
+  121, 129, 130, 255) is likewise not commanded: `OutcomeNotPermitted` with
+  `ErrPlantStateUnknown`, naming the raw value. An unknown state says nothing
+  about where the blades are or who holds control, so neither the target-state
+  comparison nor the rights check can be carried out. The value 137 has been
+  observed on a real park.
 - A state whose OPC item is missing, faulted, of bad quality, or (with
   `WithMaxStateAge`) stale is an error, not a state.
 
-An unforced `Stop` does accept a plant Enercon already stopped — the plant is
-standing still, which is what was asked for. A forced `Stop` does not.
+### What a plant reports in `Ctrl`
+
+**`Ctrl` carries the value that was set.** After `SetCtrl 7` the plant reports
+**7** and holds it; no blade angle is ever reported there. The data sheet
+describes `Ctrl` as an operating state, which this package first read as "the
+plant answers with the blade angle a command produces, 1 or 2, and never with
+the command value" — that reading is wrong.
+
+`CtrlValue.Reached(want)` is therefore exact equality against the command value.
+A plant reporting `CtrlStop90` has **not** carried out a gradient stop at 90°,
+however its blades stand: the blades are at the same angle, but the command is a
+different one, and a forced request asks for that command.
+
+Every state a client can have caused (0 to 8) is commandable, so a plant stopped
+for species protection can be started again; only the states reserved for
+Enercon (129, 130), a rejected value (121), a communication error (255) and
+values outside that set are refused.
+
+The blade angle a command produces is still what ranks how deep a stop is, which
+is the separate question an unforced `Stop` asks.
+
+An unforced `Stop` is satisfied by any state at least as stopped as the one
+asked for. A plant Enercon already stopped counts, and a plant at 90° satisfies
+a request for 60° — commanding it would open the blades back up. A shallower stop
+never counts: a plant at 60° is commanded to 90° when `fullStop` is set. A forced
+`Stop` requires exactly the requested state.
 
 ## Commands
 
 | Method | Purpose |
 | --- | --- |
 | `Start(ctx, userID, plants...)` | Run the plants. |
-| `Stop(ctx, userID, fullStop, forceExplicitCommand, plants...)` | Stop at 90° (`fullStop`) or 60°. With `forceExplicitCommand` the plant must reach exactly that stop state; without it, any stop state satisfies the request. |
+| `Stop(ctx, userID, fullStop, forceExplicitCommand, plants...)` | Stop at 90° (`fullStop`) or 60°. With `forceExplicitCommand` the plant must reach exactly that stop state; without it, any state at least as stopped as the one asked for satisfies the request. |
 | `SetCtrl(ctx, userID, value, forceExplicitCommand, plants...)` | Send any documented control value, including the gradient stops and the stops for ice detection, shadow flicker and species protection. |
 | `SetRbh(ctx, userID, value, plants...)` | Send any documented heating value, including `RbhSetPresetDuration`, which the named methods do not cover. |
 | `IceDetOn` / `IceDetOff` / `SetIceDet(ctx, userID, value, plants...)` | Switch the ice warning lamp. |
@@ -214,6 +254,142 @@ The heating **status word** read from a plant is a bit field, decoded with
 values. `RbhIsInstalled(status)` answers whether a plant has heating at all
 (bit 15), which also covers the whole-word "not installed" value.
 
+## Layout
+
+```
+energontrol/           the library: client, protocol, value types, errors
+  opcxmlda/            the OPC XML-DA transport, on top of gopcxmlda
+  cmd/scadaprobe/      a diagnostic client to point at a real SCADA
+  test/                tests that command real turbines (build tag opc_integration)
+```
+
+`energontrol` does not import `gopcxmlda`; only `opcxmlda` does. Every test file
+is named after the production file it covers.
+
+## Checking a real SCADA
+
+`cmd/scadaprobe` is an interactive diagnostic and control client. It takes its
+configuration from the environment — the same variables the live test suite
+uses, so an existing `.env` works as is:
+
+```sh
+OPC_URL=http://scada.example:8080/DA \
+USERID=1234 PARKNO=4242 ENERGONTROL_TEST_PLANTS=2,4 \
+    go run ./cmd/scadaprobe
+```
+
+It starts by reading: the park listing, which functions each plant offers, and
+the state of the selected plants. Then it verifies the park number against the
+server and opens a menu — read the states, diagnose the server, change the plant
+selection, toggle `forceExplicitCommand`, or one of the control operations.
+
+**Every command the library can send has a menu entry**, grouped and listed the
+way the data sheet is:
+
+| Group | Entries |
+| --- | --- |
+| Control values (`Ctrl/SetCtrl`) | all nine documented values, in data-sheet order: start (0), stop at 60° (1) and 90° (2), the gradient stops (3, 4), the stops for ice detection (5) and shadow flicker (6), and the species-protection stops at 60° (7) and 90° (8) |
+| Rotor blade heating (`Ctrl/SetRbh`) | back to automatic (0), suppress automatic (2), heating on (10), preset duration (128) |
+| Ice warning lamp (`Ctrl/SetIceDet`) | off (0), on (8) |
+| Fault acknowledgement (`Reset/SetReset`) | reset |
+| Several parameters in one session | a control value, a heating value and the lamp together; each part optional |
+
+Every label names the value it writes, so a selection can be checked against the
+data sheet without reading the source. The values above 8 are deliberately
+absent: those are states a plant reports, not commands a client may send.
+
+`forceExplicitCommand` is a menu toggle rather than a question per command. Off —
+the default — a stop request is satisfied by any state at least as stopped as
+the one asked for; on, the plant must reach exactly the state the command
+produces, and a plant Enercon has stopped is reported as not permitted. The
+confirmation screen shows which way it is set for the commands it affects.
+
+**Nothing is written until an operation is confirmed.** Choosing one shows what
+would be sent, to which plants, as which user, the state those plants are in
+right now, and what the consequences are — and then asks the operator to type
+that operation's *name* back. A plain `yes` does not send it; neither does the
+menu key. Afterwards the report says what was written, what each plant answered,
+and what to do about a failure (which errors must not be retried, which mean the
+command may have taken effect anyway).
+
+A command is offered at all only when three things hold together: the server
+confirmed `PARKNO`, `ENERGONTROL_TEST_PLANTS` names the plants explicitly, and
+`USERID` is set. A command never defaults to the whole park.
+
+The diagnosis answers the questions this library's contracts rest on: whether
+the server pages its browse answers, whether it fills item timestamps (so
+`WithMaxStateAge` can detect a stale value as well as demand a fresh one),
+whether it reports a problem with one item *per item* rather than failing the
+whole request, and how long a round trip takes — with a recommended
+`WithSessionPolling` budget from the p95, since that budget is a wall-clock
+deadline that has to hold several round trips.
+
+Everything goes into `scadaprobe.log` as JSON lines: every menu choice, every
+offer and confirmation or abort, every OPC request with the items and values it
+carried and what came back, the library's own warnings, and the outcome per
+plant. The log is appended to and never truncated. The user id is the one thing
+kept out of it — including inside the `SessionRequest` write, where the Enercon
+schema puts it between the session id and the private key; it is redacted in
+place so the array still reads as the data sheet defines it.
+
+### What it writes
+
+Reading writes nothing — `GetStatus`, `Browse` and `Read` only. A control
+operation writes exactly the three items the Enercon session schema defines,
+per plant, and nothing else:
+
+| Step | Item | Value |
+| --- | --- | --- |
+| reserve | `.../{Ctrl,Reset}/SessionRequest` | session id, user id, private key |
+| enter | `.../Ctrl/SetCtrl`, `SetRbh`, `SetIceDet`, or `.../Reset/SetReset` | the value, private key, public key |
+| submit | `.../{Ctrl,Reset}/SessionSubmit` | private key, public key |
+
+Everything else a command does is a read: the session state four times, the
+session id twice, the public key, the value read-back, and the remaining session
+timeout if a session had to be left open.
+
+## The transport
+
+The OPC server is reached through the `Transport` port. The transport for an
+Enercon SCADA is `opcxmlda.New(server)`, from the subpackage of that name, which
+is what nearly every caller wants.
+
+The port speaks item names and unsigned integers — nothing about SOAP, XML or a
+particular OPC client library reaches past it. The adapter lives in a package of
+its own so that `energontrol` does not import that library at all, which is what
+makes the boundary a compile error rather than a code-review item: an interface
+cannot leak types it cannot name, and the port's predecessor was built from
+those types and did leak.
+
+Past the port, three rules live in exactly one place. An implementation owns
+them:
+
+- **Correlating a response with its request.** Every result carries the
+  requested name it belongs to, never a name derived from an item's position.
+- **Following a paged browse to its end.** A partial listing is never returned
+  without an error, because a plant missing from a park listing is never
+  commanded and never monitored.
+- **Separating an error about the request from an error about one item.** An
+  item-level fault belongs in `ItemResult.ResultID` and must not fail the call.
+
+The third one is where an OPC XML-DA detail meets a safety property. A
+conformant server reports an item fault in that item's `ResultID` and, since
+`ReturnErrorText` defaults to true, adds an `<Errors>` element with the
+localised text for it. A client library that reports *that* as a failed request
+turns one bad item name into a failed read for a whole park — and inside a
+command into a failed batch with every reserved session left open for the
+server's 60 s timeout. The shipped transport classifies it as item-level and
+keeps the response. A transport failure, a SOAP fault, and an `<Errors>` element
+that no returned item accounts for all stay failures of the request.
+
+The boundary is worth knowing, because it belongs to the stack rather than to
+this package. All of that concerns a response the transport could parse, in
+which the server reported a problem with a particular item. A response that
+cannot be parsed at all — a `<Value>` without the `xsi:type` the schema
+requires, say — fails as a whole: `gopcxmlda` is deliberately fail-fast about
+decoding, and rightly so, since a reply that malformed says nothing trustworthy
+about any of its items.
+
 ## Errors
 
 Every error wraps a sentinel, so failures can be classified:
@@ -226,6 +402,8 @@ case errors.Is(err, energontrol.ErrInsufficientRights):
 	// the user id lacks the rights — retrying will not help
 case errors.Is(err, energontrol.ErrServerNotRunning):
 	// the SCADA answered but is not running
+case errors.Is(err, energontrol.ErrOutcomeUncertain):
+	// the command was submitted; it may have taken effect
 }
 ```
 
@@ -235,21 +413,33 @@ expected and the observed session state.
 ## Options
 
 ```go
-client := energontrol.New(server,
+client := energontrol.New(opcxmlda.New(server),
 	energontrol.WithLogger(slog.Default()),
-	energontrol.WithSessionPolling(100*time.Millisecond, 2*time.Second),
+	energontrol.WithSessionPolling(100*time.Millisecond, 5*time.Second),
+	energontrol.WithCommandTimeout(30*time.Second),
 	energontrol.WithMaxStateAge(30*time.Second),
 	energontrol.WithSessionRelease(releaseSession),
 )
 ```
 
+`New` panics on a nil transport or an unusable option value — both are
+programming errors that should surface on the first run. Where the values come
+from a configuration file, use `NewWithOptions`, which returns them as an error
+wrapping `ErrInvalidOption`. Options are order-independent: they record what was
+asked for, and the clamping against the session lifetime happens once, after all
+of them have been applied.
+
 | Option | Effect |
 | --- | --- |
 | `WithLogger` | Attach an `*slog.Logger`. By default the package logs nothing. |
-| `WithSessionPolling` | How often and how long to wait for **one** session state transition — a command waits for four. Default 100 ms over 1 s; raise the timeout for a slower SCADA. Values above the session lifetime are clamped to it. |
-| `WithMaxStateAge` | Reject item values older than this with `ErrStaleValue`. **Off by default** — it depends on the server returning item timestamps and on both clocks agreeing. Enabling it with a value well above the SCADA's update cycle is recommended in production. The check is strict: an item with no timestamp is rejected with `ErrNoItemTime`, because an age that cannot be established is not an age within the limit. |
+| `WithSessionPolling` | How often and how long to wait for **one** session state transition — a command waits for four. Default 100 ms over 5 s. The timeout is a wall-clock deadline and every attempt is a SOAP round trip, so a slow SCADA gets fewer attempts from the same budget; a minimum of four is made regardless. Values above the session lifetime are clamped to it. |
+| `WithMaxStateAge` | Demand values no older than this, and reject what arrives older with `ErrStaleValue`. Every read carries the age as OPC XML-DA's `MaxAge`, which obliges the server to read the device instead of its cache (*prevention*); the item timestamp is then checked against the same limit (*detection*, for a server that ignores the attribute). **Off by default** — the detecting half depends on the server returning item timestamps and on both clocks agreeing. The check is strict: an item with no timestamp is rejected with `ErrNoItemTime`, because an age that cannot be established is not an age within the limit. At most ~24 days (`MaxAge` is an `xs:int` in milliseconds). |
 | `WithSessionLifetime` | Override the 60 s session lifetime that bounds every wait inside a command. Only for an installation whose documentation states a different value. |
-| `WithLenientVerification` | Accept a written item the server did not confirm, and a session that could not be read back. Gives up evidence; see *Session verification*. |
+| `WithLenientWriteConfirmation` | Accept a written item the server did not confirm. Gives up the only evidence a `Reset` has; the value read-back remains. |
+| `WithLenientSessionVerification` | Accept a session whose id, or whose written value, could not be read back. Gives up **both** checks the session schema requires; attach a logger, or the warnings go nowhere. |
+| `WithLenientVerification` | Both of the above. The widest tolerance the package offers; see *Session verification*. |
+| `WithCommandTimeout` | Bound a whole command, including the wait for a free session before any reservation exists — which the session lifetime does not cover. Off by default. |
+| `WithItemRoot` | Point the client at a different root of the address space. Default `"Loc"`; everything below it follows the data sheet. |
 | `WithSessionRelease` | Close sessions that were reserved but could not be completed. |
 
 ### Sessions that cannot be completed
@@ -272,7 +462,7 @@ single plant. They constrain how commands may be scheduled:
 | | |
 | --- | --- |
 | Session timeout (enforced: bounds every wait, then `ErrSessionExpired`) | 60 s |
-| Default polling budget **per state transition** (`WithSessionPolling`) | 1 s |
+| Default polling budget **per state transition** (`WithSessionPolling`) | 5 s |
 | Extension timeout after setting a value | 60 s |
 | Delay before a new reservation **after a stop** | 360 s |
 | Delay before a new reservation after a start | 0 s |
@@ -315,10 +505,20 @@ Exactly one case stays tolerated: a server that does not report the session id a
 all. The id is never drawn as zero, so a zero read-back is logged as "cannot
 verify" rather than treated as a mismatch.
 
-`WithLenientVerification` restores the tolerant behaviour for a server that
-genuinely cannot answer these reads. It gives up real evidence — turn it on only
-for an installation where the strict behaviour has been shown to reject writes
-the server did carry out.
+`WithLenientSessionVerification` restores the tolerant behaviour for a server
+that genuinely cannot answer these reads, and `WithLenientWriteConfirmation`
+covers a server that does not echo written items;
+`WithLenientVerification` enables both. They give up real evidence — turn one on
+only for an installation where the strict behaviour has been shown to reject
+commands the server did carry out, and prefer whichever of the two narrower
+options is actually needed.
+
+One limit of the value read-back is worth knowing: comparing the value the
+session holds against the value written establishes nothing when that value is
+zero, because `CtrlStart`, `RbhSetStandard` and `IceDetLampOff` all write 0 and
+an untouched item reads back the same. Where the server also reports the private
+key back, that key is checked instead — it is never drawn as zero. Where it does
+not, the write confirmation is the remaining evidence and the gap is logged.
 
 > The session id space holds 19 values, so two clients competing for one plant
 > draw the same id about once in nineteen attempts, and the ownership check then
@@ -341,6 +541,39 @@ The `ServerState` that every read and write response carries **is** checked, not
 just the one `GetStatus` reports before a command: a server that degrades to
 `failed` or `suspended` mid-session stops receiving commands, and its values stop
 being used as process values.
+
+## Data freshness
+
+A server may answer a read from its cache, and a control decision taken on a
+stale state is a decision taken on the wrong state. `WithMaxStateAge` closes
+that from both ends:
+
+- **Prevention.** Every read carries the age as the `MaxAge` attribute on the
+  request's item list, which obliges the server to fetch a fresh value from the
+  device.
+- **Detection.** The item timestamp is checked against the same limit, so a
+  server that ignores `MaxAge` and answers from its cache anyway is still
+  caught.
+
+With the option off, no `MaxAge` is sent at all — the specification reads a
+`MaxAge` of 0 as a demand for the most accurate data available, so sending it
+for a caller who never asked would turn every read into a device read.
+
+## The address space
+
+Item names follow the technical data sheet: the park number at `Loc/LocNo`, the
+plants below `Loc/Wec` as `Loc/Wec/Plant<n>`, and the `Ctrl` and `Reset`
+branches below each. `WithItemRoot` moves the root for an installation that does
+not expose its park under `Loc` — everything below the root, including the `/`,
+follows the data sheet and is not configurable. Without that option such an
+installation answers *nothing*: every item comes back missing, for every plant,
+with no hint as to why.
+
+A plant node enters the listing only if this package would address it under the
+name the server itself gave it. A server naming its nodes `Plant007` reports
+plant 7, but a command would go to `Loc/Wec/Plant7`, which that server does not
+have — so the node lands in `TurbineInfo.Unsupported` rather than being listed
+as usable.
 
 ## Plant numbers
 
@@ -375,20 +608,44 @@ go test ./...          # unit and protocol tests, no network, no turbines
 go test -race ./...
 ```
 
-The protocol tests run against an in-memory OPC server (`fake_opc_test.go`) that
-models the session state machine and can inject the failures a real SCADA
-produces: unexpected value types, faulted items, bad quality, missing items,
-reordered responses, occupied and stuck sessions, sessions in loop mode, a
-session reserved by another client, a value that does not read back, a write the
-server does not confirm, a server that degrades mid-command, and a transport
-that breaks in any single phase of the procedure.
+Every test file is named after the production file it covers, so `session.go` is
+tested by `session_test.go` and nothing else. Three files carry more than that
+name suggests, and are worth knowing about:
 
-`spec_test.go` reconciles the implementation with the ENERCON SCADA PDI-OPC
-technical data sheet: the value sets, the item names, the array layouts, the
-session states and the timing constraints.
+`transport_test.go` holds the in-memory `Transport` the protocol tests run
+against. It models the session state machine and can inject the failures a real
+SCADA produces: faulted items, bad quality, missing items, reordered responses,
+occupied and stuck sessions, sessions in loop mode, a session reserved by
+another client, a value that does not read back, a write the server does not
+confirm, a server that degrades mid-command, and a transport that breaks in any
+single phase of the procedure.
 
-Tests that command **real turbines** are behind a build tag *and* an environment
-guard, and verify the park number before sending anything:
+`opcxmlda/transport_test.go` drives the real `gopcxmlda` adapter against an
+HTTP test server with real SOAP responses — the layer the in-memory transport
+sits above and therefore cannot reach: response correlation (including a handle
+that contradicts its item name), value decoding for every `xsi:type` a server
+may choose, browse paging, the distinction between an error about the request
+and an error about one item, and the payloads that go out. The array element
+width is pinned there in particular, where a `[]uint64` would emit
+`ArrayOfUnsignedLong` instead of the long word the items are typed as.
+
+`doc_test.go` is the one file that sees the package from outside
+(`package energontrol_test`). It does not repeat the protocol tests; it asks
+whether the exported surface is enough to use the package — whether a caller can
+implement `Transport` without reaching for an unexported type, classify every
+failure through the sentinels, and read a result without guessing. The runnable
+example lives there too.
+
+The value sets, item names, array layouts, session states and timing
+constraints are reconciled against the ENERCON SCADA PDI-OPC technical data
+sheet by the `TestSpec…` tests, which sit in the file of whichever production
+code they pin down.
+
+Tests that command **real turbines** live in a package of their own, `test/`,
+behind a build tag *and* an environment guard, and verify the park number before
+sending anything. Only the exported API is reachable from there, so the suite
+doubles as a standing check that what the library exports is enough to run a
+park with:
 
 ```sh
 export OPC_URL=http://scada.example:8080/DA

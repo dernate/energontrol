@@ -2,6 +2,583 @@
 
 ## v2.0.0 (unreleased)
 
+### Findings from the first run against a real SCADA
+
+**A plant already stopped at 60° can now be taken to 90°.** An unforced `Stop`
+reported a plant at 60° as `OutcomeAlreadyInState` when a 90° full stop was
+requested, wrote nothing, and `InRequestedState()` answered true — a wrong yes
+of exactly the kind the rest of the package is built to avoid. 60° is not 90°,
+and the blades stayed where they were while the caller was told the full stop
+had happened.
+
+The cause was the tolerance being expressed as set membership. `ctrlSatisfied`
+ended in `current.Stopped()`, and `Stopped()` is true for all four stop states,
+so every stop satisfied every stop request. The tolerance was only ever
+justified for the two states Enercon reserves for itself: a plant Enercon has
+stopped is standing still, which is what a stop asks for, and it cannot be
+commanded anyway.
+
+The tolerance is now monotonic instead. An unforced stop request is satisfied by
+any state at least as stopped as the one asked for, ranked by blade angle:
+running, 60° (`CtrlStop60`, `CtrlStop60Enercon`), 90° (`CtrlStop90`,
+`CtrlStopEnercon`). A state that says nothing about where the blades are —
+`CtrlValueRejected`, `CtrlCommError` — ranks below running and satisfies
+nothing, unchanged. In practice:
+
+| plant reports | request | before | now |
+| --- | --- | --- | --- |
+| `Stop60` | 90° full stop | already in state, nothing written | commanded |
+| `Stop90` | 60° stop | already in state | already in state (unchanged — commanding it would open the blades back up) |
+| `Stop60Enercon` | 90° full stop | already in state | `OutcomeNotPermitted`, `ErrPlantUnderEnerconControl` |
+| `Stop60Enercon` | 60° stop | already in state | already in state (unchanged) |
+| `StopEnercon` | either stop | already in state | already in state (unchanged) |
+| `CommError` | either stop | not permitted | not permitted (unchanged) |
+
+`forceExplicitCommand` is unaffected: it still requires exactly the state the
+command produces. The stops for ice detection and shadow flicker still have no
+documented resulting state and are therefore always sent.
+
+`CtrlValue.Stopped()` keeps its meaning and stays exported — it answers "is this
+plant standing still", which is a fair question for a caller to ask. It is no
+longer what decides whether a command is needed.
+
+**The user id no longer reaches the `scadaprobe` log.** It was written as a
+field of the `session started` and `command sending` records and, less visibly,
+as the middle element of the `values` array of the `SessionRequest` write, where
+the Enercon schema puts it between the session id and the private key. It is the
+operator's credential for the park and a log file gets copied into tickets, so
+it is redacted in place — the array still reads as the data sheet defines it and
+the other two elements stay checkable.
+
+### Ctrl carries the value that was set
+
+A live run stopped a plant for species protection. The command went through, the
+plant reported `Ctrl` = **7** — the value that was set — and held it. Two things
+went wrong, both from one assumption:
+
+- the tool waited a full minute for `Stop60` and then warned that the command
+  might still be taking effect, while the plant had been stopped for 59 of those
+  seconds;
+- afterwards the plant could not be started, because `Commandable` allowed only
+  0, 1 and 2, so state 7 was refused as a state this package does not know.
+
+The assumption was that a plant never reports the command values 3 to 8 and
+always answers with the resulting blade angle. It was written into
+`expectedCtrlAfter`, `Stopped`, `stopDepth` and `Commandable`, stated in the
+package documentation, and pinned by a test named after it. **No blade angle is
+ever reported in `Ctrl`.** The item carries the value that was set, and for the
+values 1 and 2 the two readings are numerically identical, which is why nothing
+ever contradicted the wrong one.
+
+	// Reached reports whether a plant reporting state v has carried out the
+	// command value want.
+	func (v CtrlValue) Reached(want CtrlValue) bool { return v == want }
+
+`Reached` is exported, because a monitoring loop needs exactly this question and
+had no way to ask it — the diagnostic client had reimplemented the old, wrong
+answer for itself. That duplicate is gone; the loop now calls `Reached`.
+
+An intermediate version of this fix accepted *both* readings, on the reasoning
+that a client cannot know a park's convention in advance. That was wrong in a way
+worth recording, because it was not merely redundant: with the blade angle also
+counting, a forced request for a command sharing an angle with the plant's
+current state was reported as already satisfied and never sent — a forced
+gradient stop at 90° on a plant standing at `Stop90` wrote nothing and returned
+`InRequestedState() == true`. Tolerance that costs a wrong "yes" is not
+tolerance. `Reached` is exact.
+
+The rest follows from the corrected model:
+
+| | before | now |
+| --- | --- | --- |
+| `Commandable` | 0, 1, 2 | 0 to 8 — every state a client can have caused |
+| `Stopped` | 1, 2, 129, 130 | all of those plus 3 to 8 |
+| `stopDepth` | 1, 129 → 60°; 2, 130 → 90° | plus 3, 7 → 60° and 4, 8 → 90° |
+| forced request | the blade angle only | the value that was set, exactly |
+
+The blade angle a command produces is still what ranks how deep a stop is —
+that is the separate question an unforced `Stop` asks, and it is unchanged.
+
+The data sheet's "only operating states with the values 0-2 can be changed"
+describes the three states its own table lists; it is not a lock-out, and
+reading it as one meant a client-initiated species-protection stop could never
+be undone — which is what the run hit.
+
+One consequence worth naming: the stops for ice detection and shadow flicker,
+which name no blade angle, are now verifiable. Nothing can be claimed to satisfy
+them in advance, so they are still always sent, but the plant reporting the value
+that was set lets the monitoring loop confirm they took effect.
+
+A test of this package's own was wrong in a way worth recording: it asserted
+`strings.Contains(out, "every plant has carried out X")`, which the warning
+"**not** every plant has carried out X" also satisfies. It passed whatever the
+code did. The assertions are anchored on the pass marker now, and the rest of
+the suite was swept for the same trap.
+
+### An undocumented plant state is reported as one
+
+A test run found a plant reporting `Ctrl` = **137**. Enercon documents 0, 1, 2,
+121, 129, 130 and 255 for that item, so 137 is outside the set this package was
+written against. The plant could not be started — correctly, because an unknown
+state says nothing about where the blades are or who holds control, so neither
+the target-state comparison nor the rights check can be carried out, and the
+command is refused before a session is opened.
+
+What was wrong was the *reason given*. The refusal wrapped `ErrSessionState`,
+whose message reads "unexpected session state: unknown state CtrlValue(137)" —
+which points an operator at session timeouts and reservation delays, the one
+place where the problem is not. There is now `ErrPlantStateUnknown`, sitting
+with the other plant-state errors rather than with the session errors:
+
+	energontrol: plant reports a control state this package does not know (state CtrlValue(137))
+
+`scadaprobe` adds what to do about it: retrying changes nothing, the raw value
+has to be looked up in the data sheet for the controller type, and the value is
+worth reporting because this package's value set may need extending.
+
+The behaviour — refuse, write nothing, never report the plant as being in the
+requested state — is unchanged.
+
+### The test client offers every command
+
+`cmd/scadaprobe` listed eleven operations and reached the gradient stops, the
+stops for ice detection and shadow flicker, and the species-protection stops
+only through a sub-prompt behind one generic "another documented control value"
+entry. They are now menu entries of their own, so each one can be selected and
+confirmed like any other command. The menu is grouped and ordered the way the
+data sheet is, and every label names the value it writes — `stop for species
+protection at 90° (SetCtrl 8)` — so a selection can be checked against the data
+sheet without reading the source.
+
+Two things that were unreachable from the tool are now reachable:
+
+- **`forceExplicitCommand`** as a menu toggle. Only `false` was ever passed
+  before, which is precisely the dimension the Stop60 finding above lived in.
+  The confirmation screen shows how it is set for the commands it affects.
+- **`ControlAndRbh`**, the combined command, which writes a control value, a
+  heating value and the lamp in one session per plant. Each part is optional; a
+  set that writes nothing is refused at the prompt.
+
+`TestEveryDocumentedValueIsOnTheMenu` holds this open: it walks the documented
+value sets and fails if any value Enercon defines for `SetCtrl`, `SetRbh` or
+`SetIceDet` has no entry, if the control group has more or fewer than the nine
+writable values, or if that group is out of data-sheet order.
+
+The fake SCADA in the tool's tests confirmed written parameters with a constant
+`{0, 0, 0}`, so the library's read-back verification of a written value was
+never exercised through it. It now remembers what was written, serves it back,
+and applies a submitted control value to the reported state — which is what lets
+the Stop60 regression test run through the whole stack.
+
+### Hardening after the second pre-release audit
+
+A second independent architecture and code audit was run on the hardened v2
+candidate. Its findings had a shape worth naming, because it is the shape a
+test suite cannot catch: the package stated a property, documented it at
+length, tested it — and the property did not hold, because the tests sat above
+the layer where it broke. The fake implemented the OPC client interface
+directly, so everything between a SOAP response and a Go value was unreachable
+from 130 tests. All findings rated critical, high or medium are fixed below;
+each fix carries a test that fails without it.
+
+**The OPC layer is now a port of this package's own, not the client library's
+interface.** `Transport` speaks item names and unsigned integers;
+`opcxmlda.New(server)` adapts a `*gopcxmlda.Server` to it. The
+interface it replaces, `OpcClient`, was built from `gopcxmlda`'s types and
+signatures — including its `*string` out-parameters and
+`map[string]interface{}` options — so every breaking change in that library was
+a breaking change in energontrol's public API, and the documented promise that
+"an alternative transport can be substituted" held only for something that
+produced `gopcxmlda` structs. It was a test seam, not an abstraction. Three
+rules now live in the adapter, in one place each, instead of being spread
+through the package or missing:
+
+**An error about one item no longer fails the whole request.** This was
+the critical finding. OPC XML-DA reports an item fault in that item's
+`ResultID` attribute and, since `ReturnErrorText` defaults to true — and this
+package requests it explicitly — adds an `<Errors>` element carrying the
+localised text. `gopcxmlda` surfaces that element as an error from `Read`, and
+the package treated it as a failure of the request, discarding a response that
+was complete and usable. The consequence was that the entire per-item error
+path this package is built around — `ErrItemFault`, `ErrBadQuality`,
+`ErrItemMissing`, the `PlantState.Err` column, the promise that "one unreadable
+plant does not blind the caller to the others" — was unreachable against a
+conformant server. Reading a park failed on a single bad item name; inside a
+command it failed every plant of the batch and left each reserved session open
+for the server's 60 s timeout, so one misconfigured item could take the park's
+control out of service a minute at a time. The adapter now classifies an error
+consisting of nothing but `*OpcResponseError` as item-level and keeps the
+response. A transport failure, a SOAP fault, and an `<Errors>` element that no
+returned item accounts for all remain failures of the request.
+
+**A paged browse is followed to its end.** `MoreElements` and
+`ContinuationPoint` were read nowhere in the package. A server that answers a
+browse of `Loc/Wec` with part of the listing produced a short park — with
+`err == nil` and an empty `Unsupported`, breaking the exact guarantee
+`Turbines` gives in its own documentation. The same fault made a plant appear
+to have no `SetCtrl` when its `Set*` listing was paged. The adapter now follows
+continuation points, and reports `ErrBrowseIncomplete` for a server that
+announces more elements without handing out a point, repeats one, or never
+finishes.
+
+**A response whose handle contradicts its item name is refused.**
+Correlation was by `ClientItemHandle` with a fall-back to `ItemName`, but where
+a server supplied both and they disagreed, the handle won silently. Two such
+items are two swapped turbines — the failure positional matching was rejected
+for, only harder to see. Since `ReturnItemName` is requested precisely so the
+name is available, the cross-check is free; a contradiction is now
+`ErrUncorrelatable`.
+
+**A plant named only in `Name` is no longer lost.** `filterPlants`
+matched the full item name only. OPC XML-DA requires `ItemName` for items but
+not for branches, so a server that fills in only `Name` produced a park listing
+with the plant in neither `PlantNo` nor `Unsupported` — the silent loss
+`Unsupported` exists to prevent. Both forms are now recognised, duplicates are
+collapsed, and the burden of proof is reversed: a node that cannot be made
+sense of at all is reported, since staying silent about one requires being sure
+it is not a plant.
+
+**The polling budget has a floor.** The default was one second per state
+transition, justified in a code comment as "ten attempts at 100 ms, the budget
+v1 used and proven in the field". v1 polled a fixed eleven times with a sleep
+between attempts, independent of latency; v2's budget is a wall-clock deadline,
+and every attempt is a SOAP round trip — on a SCADA answering in 300 ms it
+bought two or three. The default is now five seconds, and at least four
+attempts are made regardless of the clock. The session lifetime still overrides
+both: a guaranteed attempt on a session the server has dropped is not worth
+guaranteeing.
+
+**`WithLenientVerification` was three tolerances behind one name, and its godoc
+described one of them.** It said it accepted an unconfirmed write and
+that "for control commands it leaves the value read-back as the sole check" —
+while the same flag also disabled the session id read-back *and* that very
+value read-back. It is now `WithLenientWriteConfirmation` and
+`WithLenientSessionVerification`, each documenting what it gives up, with
+`WithLenientVerification` kept as the both-of-them convenience.
+
+**`New` reports what it cannot use.** `New(nil)` returned a client that
+panicked with a nil pointer dereference on its first command, somewhere inside
+a session. `WithSessionPolling(0, 0)` and `WithSessionLifetime(-1)` discarded
+their arguments without a word, so a duration misread from a configuration file
+became a default nobody chose. `New` now panics immediately, with a message
+naming the problem, and `NewWithOptions` returns it as an error wrapping
+`ErrInvalidOption` for callers whose values come from configuration.
+
+**Options are order-independent.** `WithSessionPolling` clamped its
+timeout against whichever session lifetime happened to be set at the moment it
+ran, so `WithSessionPolling(1s, 90s), WithSessionLifetime(120s)` produced a
+60 s budget while the same two reversed produced 90 s. Options now only record
+what was asked for; the clamping happens once in `New`, with every option
+applied.
+
+**`WithCommandTimeout` bounds a command as a whole.** The session
+lifetime bounds everything from the reservation onwards, but the wait for state
+"free" happens before a session exists — so a generous polling budget could be
+spent waiting to start and a full lifetime spent afterwards, while the
+documentation claimed the lifetime was "the ceiling on everything a command
+waits for". That claim is now accurate about what it covers, and this option is
+the single figure a scheduler can reason about.
+
+**`OutcomeFailed` no longer implies that nothing was written.** If the
+procedure fails only at the last step, the submit was written and confirmed:
+the server holds the value and has committed it, and only the confirmation that
+the session wound down is missing. Reporting a plain failure invited a retry,
+and a retry of a `Start` or a `Reset` is a second command to a plant that may
+already have had one — a `Stop` is protected by the 360 s re-reservation delay,
+those two are not. Such a plant now also carries `ErrOutcomeUncertain`.
+
+**The value read-back is checked against the private key where the value is
+zero.** `CtrlStart`, `RbhSetStandard` and `IceDetLampOff` all write 0,
+and an item that was never written reads back the same — so for those three the
+read-back established nothing, and `Start` is not a rare command. The private
+key is never drawn as zero, so where the server reports it back it is checked
+instead. Where it does not, the write confirmation is the remaining evidence
+and the gap is logged rather than counted as a check that passed.
+
+### Data freshness is demanded, not just checked
+
+The last open finding of the second audit, and the one that could not be fixed
+from this repository until now: `gopcxmlda` v1.2.1 adds the `MaxAge` attribute,
+so `WithMaxStateAge` can finally ask for what it was always meant to ask for.
+
+Before, the option only compared the timestamp the server had chosen to send.
+That detects a stale value but does not prevent one, and it depends on the
+server filling `ItemTime` and on both clocks agreeing — so on a server that
+answers from its cache and reports no timestamps, the option did nothing at all
+beyond rejecting the reads outright.
+
+Every read now carries the age as `MaxAge` on the request's item list, which is
+where the specification puts it — not among the `RequestOptions`, which have no
+such attribute. It goes on the list rather than on each item because every item
+of one request carries the same requirement. The timestamp check stays as the
+second line: a server that ignores the attribute is still caught.
+
+With the option off, no `MaxAge` is sent at all. A `MaxAge` of 0 is a demand for
+the most accurate data available, not the absence of one, so sending it for a
+caller who never asked would silently turn every read into a device read.
+Sub-millisecond ages round down to exactly that device read, and an age beyond
+the `xs:int` range the attribute uses — about 24 days — is rejected as an option
+error rather than as a read that fails at run time.
+
+This is what the `Transport` port gained a `ReadOptions` argument for. A
+transport that cannot express `MaxAge` degrades to detection rather than to
+nothing, since the timestamp check sits above the port.
+
+### A diagnostic client, and the bug it found
+
+`cmd/scadaprobe` is an interactive client to point at a real SCADA. It is
+configured from the environment (`OPC_URL`, `USERID`, `PARKNO`,
+`ENERGONTROL_TEST_PLANTS`), reads the park and the plant states, verifies the
+park number against the server, and then offers a menu: read, diagnose, change
+the plant selection, or one of eleven control operations.
+
+Nothing is written until an operation is confirmed, and the confirmation is the
+operation's own name typed back rather than a `yes` — so the habit of confirming
+cannot send a command nobody read. A command is offered at all only when the
+park is confirmed, the plants are named explicitly, and a user id is set.
+
+The diagnosis answers the things the library's contracts rest on: whether the
+server pages its browse answers, whether it fills item timestamps, whether it
+reports a faulted item per item rather than failing the request, and the
+round-trip latency the session polling budget has to be sized against — which
+was the one figure the library's default had been reasoned about rather than
+measured.
+
+Everything lands in `scadaprobe.log` as JSON lines: every choice, every offer
+and its confirmation or abort, every OPC request with its items and values and
+what came back, the library's own warnings, and the outcome per plant. That is
+deliberate: a run against a real park is the evidence, and evidence has to be
+readable afterwards.
+
+Driving it against a simulated SCADA found a real defect on its first run.
+**A write reply had its item values decoded as if it were a read.** An
+OPC XML-DA write reply confirms items; `ReturnValuesOnReply` invites a server to
+echo their values but does not oblige it to, and nothing above the port looks at
+them. Decoding them anyway turned every bare confirmation into
+`ErrUnexpectedType` — so against a server that confirms without echoing, which
+is what an Enercon SCADA does, **every command failed** on the very first write
+of the session.
+
+Nothing in the suite could have seen it. The core's in-memory transport sits
+above the decoding, and the adapter's own tests all happened to echo a value.
+It took driving the whole library through real SOAP, which is what the tool
+does, and it is exactly the class of gap the second audit named: a contract that
+holds against the fake and not against a server. It is now pinned from both
+sides — `TestAdapterWriteConfirmationNeedsNoValue` for a write that carries no
+value, `TestAdapterReadStillNeedsAValue` for the read where the absence of one
+is still an error.
+
+### Package layout
+
+The library is three packages now, and the split is the point rather than a side
+effect.
+
+```
+energontrol/           the library: client, protocol, value types, errors
+  opcxmlda/            the OPC XML-DA transport, on top of gopcxmlda
+  cmd/scadaprobe/      a diagnostic client to point at a real SCADA
+  test/                tests that command real turbines (tag opc_integration)
+```
+
+**`energontrol` no longer imports `gopcxmlda`.** The adapter moved to
+`opcxmlda`, and `NewGopcxmldaTransport(server)` became `opcxmlda.New(server)`.
+This is the only API change, and it is the reason for the move: the port was
+already clean, but only by discipline — nothing stopped a `gopcxmlda` type from
+appearing in a `Transport` signature again, which is exactly the defect the
+first audit found in the interface this port replaced. A package boundary turns
+that mistake into a compile error. The core cannot leak types it cannot name.
+
+Three unexported helpers the adapter used stayed behind and were replaced by
+local equivalents: `wrapf`, which is now gone from the core because nothing
+there wrapped an OPC error any more; `serverStateRunning`, a one-word constant;
+and `serverStateError`, for which the adapter returns a wrapped
+`ErrServerNotRunning` instead — nobody inspected the concrete type, only
+`errors.Is`.
+
+**The live suite moved to `test/`.** It needs nothing unexported — it drives the
+library the way a caller does — so it costs no visibility change, and it buys
+three things. The tests that move real machinery are physically separated from
+the ones that do not. The naming rule below holds everywhere again, since a
+directory without production code has nothing to pair with. And only the
+exported API is reachable from there, so the suite doubles as a standing check
+that what the library exports is enough to run a park with — the question
+`doc_test.go` asks against a fake, asked against real turbines.
+
+What was *not* split: the core. `tracker`, `sessionProcedure`, `plantCommand`,
+`itemNamer`, `resultSet`, `correlate` and `ctrlSatisfied` are unexported and
+used across every boundary a layered split would draw, so such a split would
+have to export them — widening the public surface with pure plumbing — and would
+break the eleven of thirteen test files that are white-box. 4,200 lines in one
+package is not a size problem; `net/http` is one package with several times
+that.
+
+### Test file layout
+
+Every test file is now named after the production file it covers: `session.go`
+is tested by `session_test.go` and nothing else. The suite had grown a set of
+files named after the work that produced them rather than after the code they
+exercise, which told a reader nothing about where to look for a test or where to
+put a new one. Nothing was dropped in the move; the tests are the same 204
+functions, redistributed.
+
+Three files carry more than their name suggests, which is worth knowing:
+`transport_test.go` holds the in-memory `Transport` the protocol tests run
+against, since that is an implementation of the port `transport.go` defines;
+`opcxmlda/transport_test.go` holds everything that needs real SOAP over HTTP;
+and `doc_test.go` is `package energontrol_test`, the only file that sees the
+package from outside, and holds the runnable example. The live suite is
+`test/live_test.go`, in a package with no production code to pair with.
+
+Comments no longer refer to findings by number. The numbering belonged to audit
+documents a reader of this repository does not have, so each reference was
+replaced by what it was actually pointing at.
+
+### Transport dependency
+
+`gopcxmlda` moves to v1.2.2, which brings two things this package depends on.
+
+v1.2.1 added the `MaxAge` attribute, without which the freshness demand above
+could not have been made at all.
+
+v1.2.2 corrects where a Read request carries `LocaleID` and
+`ClientRequestHandle`. The WSDL gives the `Read` element no attributes of its
+own — only an `Options` and an `ItemList` child — and they belong on
+`RequestOptions`, which has both. Putting them on `Read` was something a
+strictly validating server could reject, and it meant the request handle was
+never echoed in the reply. `opcxmlda/transport_test.go` now pins the element as
+attributeless, so the shape cannot drift back.
+
+One thing that is *not* a finding, and is recorded here so it does not get
+re-raised as one: a response `gopcxmlda` cannot decode — a `<Value>` without the
+`xsi:type` the schema requires — fails as a whole rather than per item. That is
+a deliberate fail-fast contract on the transport's side, and the right one: a
+reply that malformed says nothing trustworthy about any of its items, and
+keeping the ones that happened to parse would mean assuming the rest of the
+document is still to be believed. The boundary is pinned by
+`TestAdapterUnparseableResponseIsARequestFailure` and described in the package
+documentation, so it reads as a contract rather than as an oversight.
+
+### The low-severity findings
+
+**The item address space is configurable, and a node it cannot address is no
+longer listed as though it could be.** Every item name was built from a
+hardcoded "Loc" prefix, so an installation that exposes its park anywhere else
+answered nothing at all: every item missing, for every plant, with no hint as to
+why. `WithItemRoot` sets the root; everything below it follows the data sheet
+and stays fixed. The second half of the finding was a node named `Plant007`,
+which was taken as plant 7 and then commanded as `Plant7` — an item such a
+server does not have. A plant node now enters the listing only if this package
+would address it under the name the server itself gave it, and otherwise lands
+in `Unsupported`.
+
+**A swallowed error no longer becomes a different reason.**
+`parameterItems` discarded the error from `longWord` and returned no items,
+which `writeParameters` then reported as "nothing to write" — for a public key
+that does not fit in a long word. It now returns `([]ItemWrite, error)`, and the
+plant's result names the public key.
+
+**A diagnostic read only happens when somebody reads the diagnosis.**
+The remaining session timeout went into a log line as a call argument, and Go
+evaluates those whether or not the handler keeps the record — so every
+left-open session cost an extra OPC read into a discarded log, at the moment the
+server was already in trouble. The call is now behind `Logger.Enabled`, and the
+default logger is `slog.DiscardHandler` rather than a text handler writing to
+`io.Discard`: the latter reports itself as enabled, so the guard alone would not
+have helped.
+
+**The result set copies the plant list.** `newResultSet` kept the
+caller's variadic slice — `client.Start(ctx, id, plants...)` passes its own
+backing array — and read the report order from it after the command had
+finished. A caller reusing that slice got results attributed to plants it never
+asked about. `lockPlants` already copied for the same reason.
+
+**The linter is pinned and its rule set is checked in.** The CI ran
+golangci-lint at `latest` with no configuration, so a green build had passed
+whatever rules that day's release enabled by default — and the v1-to-v2
+transition changed both the default set and the configuration format, which
+raising the `go` directive to 1.26 forces anyway. `.golangci.yml` now pins the
+rules and `ci.yml` pins v2.13.2. Beyond the standard set it enables `errorlint`,
+`nilerr`, `exhaustive` and `durationcheck`: the contract of this package is its
+errors, and its logic is full of timing arithmetic. Turning them on found a
+`max` shadowing the builtin and two unused test helpers. The coverage floor
+moves from 85 % to 88 %.
+
+**There is a test that sees the package from outside.**
+`doc_test.go` is `package energontrol_test`. It does not repeat the
+protocol tests — those need to be driven from within — but asks the question
+nobody was asking: is what this package exports enough to use it? It implements
+a `Transport` from the exported types alone, which is a compile-time proof that
+the port carries no dependency on an unexported type, and it classifies every
+argument error, reads a park listing, decodes the status words, and inspects
+`*SessionStateError` and `*ItemError` through `errors.As`.
+
+### Go version
+
+The `go` directive moves from 1.23.0 to 1.26, which raises the minimum Go
+version for consumers of the module and is what makes `slog.DiscardHandler`
+available for the discarding default logger described above.
+
+The two directives do different jobs, and for a module that is a dependency of
+others the Go documentation names exactly this split:
+
+- `go 1.26` is the **minimum a consumer needs**. It carries no patch on
+  purpose. It is a minimum, not a pin, so any 1.26.x or newer toolchain builds
+  the module — whereas `go 1.26.7` would force every build on an older 1.26.x
+  to download a matching toolchain first, consumers included.
+- `toolchain go1.26.7` is what building **this** module uses, and it is ignored
+  when the module is somebody's dependency. Bump it with
+  `go get toolchain@go1.26.8`.
+
+CI takes neither from go.mod. `setup-go` prefers a `toolchain` line over the
+`go` line, which would pin the build to that one patch; the workflow therefore
+asks for `go-version: '1.26.x'` with `check-latest: true`, so it exercises the
+newest patch of the declared minor without anyone editing a file when a patch
+lands. The cost is that the minor is named in two places.
+
+The suite passes on both ends of that range: under 1.26.7 and, with
+`GOTOOLCHAIN=local`, under the declared minimum 1.26.0.
+
+### Tests
+
+The test gap that let the item-level error escalation survive is closed.
+`opcxmlda/transport_test.go` drives the real adapter against an HTTP test server with real SOAP responses,
+covering what the in-memory fake sits above: item faults with and without an
+`<Errors>` element, a SOAP fault alongside item errors, correlation by handle
+and by name, a handle contradicting its item name, duplicated and unrequested
+items, every `xsi:type` a server may choose for a number, arrays, quality and
+timestamps, browse paging in its three failure modes, and `ServerState` on a
+browse reply.
+
+The fake now implements `Transport`, which is both smaller and honest about
+what it proves: the protocol logic, not the wire format. The knobs that
+modelled wire-level behaviour moved to the adapter tests. Statement coverage is
+90.1 %, above the 85 % floor the CI enforces.
+
+### Migration from the earlier v2 candidate
+
+- `New`, `NewWithOptions` and every package-level command take a `Transport`
+  instead of an `OpcClient`. Wrap the server:
+  `energontrol.New(opcxmlda.New(server))`, importing
+  `github.com/dernate/energontrol/v2/opcxmlda`.
+- `SessionReleaseFunc` receives a `Transport`.
+- `WithLenientVerification` still exists and still enables both tolerances;
+  prefer `WithLenientWriteConfirmation` or
+  `WithLenientSessionVerification`.
+- `WithSessionPolling`, `WithSessionLifetime`, `WithMaxStateAge` and
+  `WithCommandTimeout` reject an unusable value instead of ignoring it. `New`
+  panics on one; use `NewWithOptions` to get an error.
+- The default polling timeout is 5 s instead of 1 s.
+- New sentinels: `ErrInvalidOption`, `ErrBrowseIncomplete`,
+  `ErrOutcomeUncertain`.
+- New option: `WithItemRoot`, for an installation whose address space does not
+  start at "Loc".
+- `Transport.Read` takes a `ReadOptions` argument, which carries the freshness
+  requirement (`MaxAge`) a transport has to put on the wire.
+- The module requires `gopcxmlda` v1.2.2: v1.2.1 for the `MaxAge` attribute,
+  v1.2.2 for the corrected placement of `LocaleID`/`ClientRequestHandle` on a
+  Read request.
+- The module requires Go 1.26 or newer.
+
 ### Hardening after the pre-release audit
 
 An independent architecture and code audit was run on the v2 candidate before
@@ -108,8 +685,8 @@ forty. It is now all or nothing (a caller who overlooked the error would read
 `ReadErr`/`WriteErr` knobs the fake already provided were never set by any test,
 so no transport-failure path was covered. Added: `discovery_test.go`,
 `api_test.go`, `transport_test.go` (a failure in each phase of the procedure,
-including the one that leaves a session reserved), and `hardening_test.go` for
-every item above. A GitHub Actions workflow now runs `go vet`, `gofmt`,
+including the one that leaves a session reserved), and a test for every item
+above. A GitHub Actions workflow now runs `go vet`, `gofmt`,
 `staticcheck` and `go test -race` with a coverage floor.
 
 **Documentation drift.** `README.md` referred to a constant `RbhSetHeatOn` that
@@ -243,8 +820,8 @@ Credentials now come from `crypto/rand`.
 ### Reconciliation with the ENERCON technical data sheet
 
 After the fixes above, the implementation was compared line by line against the
-ENERCON SCADA PDI-OPC data sheet, sections 3.4 and 4.1. `spec_test.go` pins down
-each of these.
+ENERCON SCADA PDI-OPC data sheet, sections 3.4 and 4.1. The `TestSpec…` tests
+pin down each of these.
 
 **The session id was never verified.** The Enercon session schema requires the
 client to check its session id twice — after the reservation and again after
@@ -306,8 +883,8 @@ that is 32-bit unsigned. v1 wrote `[]uint64`, which gopcxmlda encodes as
 `ArrayOfUnsignedLong` (`xsd:unsignedLong`, 64 bit); they are now `[]uint32`,
 encoded as `ArrayOfUnsignedInt`. A user id or public key that does not fit in 32
 bits is rejected with `ErrInvalidValue` instead of being truncated silently.
-`wire_test.go` drives a real `*gopcxmlda.Server` against an HTTP test server and
-asserts the type on the wire.
+`opcxmlda/transport_test.go` drives a real `*gopcxmlda.Server` against an HTTP
+test server and asserts the type on the wire.
 
 **The controller-type footnotes are reproduced** on `CtrlStop60`,
 `CtrlGradientStop60`, `CtrlStopSpeciesProtection60` and `CtrlStop60Enercon`: not
@@ -344,8 +921,8 @@ a start, 180 s lockout after three wrong entries, 300 s for a wrong user id.
 | v1 | v2 |
 | --- | --- |
 | `module github.com/dernate/energontrol` | `module github.com/dernate/energontrol/v2` |
-| `Start(ctx, Server, userID, plants...) ([]bool, []error)` | `Start(ctx, opc, userID, plants...) (Results, error)`, or `client.Start(ctx, userID, plants...)` |
-| `Server gopcxmlda.Server` (by value) | `OpcClient` interface — pass `&server` |
+| `Start(ctx, Server, userID, plants...) ([]bool, []error)` | `Start(ctx, transport, userID, plants...) (Results, error)`, or `client.Start(ctx, userID, plants...)` |
+| `Server gopcxmlda.Server` (by value) | `Transport` port — pass `opcxmlda.New(&server)` |
 | `CtrlValues["Stop60"]` (`map[string]uint64`) | `CtrlStop60` (typed `CtrlValue`) |
 | `RbhValues["ManualOn"]` | `RbhSetManualOn` (typed `RbhValue`) |
 | `RbhValues["PresetDuration"]` | `RbhSetPresetDuration` |
@@ -405,7 +982,12 @@ relying on a defect.
   conversions. A plant node outside the range is reported in
   `TurbineInfo.Unsupported` rather than dropped, so the limit cannot hide a
   turbine.
+- **Only the root of the address space is configurable.** `WithItemRoot` moves
+  the prefix; the `Wec` branch, the `Plant<n>` nodes, the `Ctrl` and `Reset`
+  branches, the item names and the `/` between them follow the data sheet. The
+  item-name delimiter is vendor-defined in OPC XML-DA, so a SCADA using another
+  one would need more than a root — but that is not a shape any Enercon
+  installation is known to take, and inventing configuration for it would be
+  speculative.
 - No default session release is shipped; the data sheet defines none.
 - `WithMaxStateAge` is off by default and has to be enabled deliberately.
-- OPC XML-DA `MaxAge` is not sent, because gopcxmlda does not support it. The
-  staleness check works from the item timestamp instead.

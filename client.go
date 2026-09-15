@@ -2,37 +2,15 @@ package energontrol
 
 import (
 	"context"
-	"io"
+	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/dernate/gopcxmlda"
 )
-
-// OpcClient is the subset of an OPC XML-DA client this package needs.
-//
-// *gopcxmlda.Server satisfies it as is. Taking an interface rather than a
-// concrete struct has three effects: the protocol logic becomes testable without
-// a network, an alternative transport can be substituted, and the client is no
-// longer copied by value — gopcxmlda.Server contains a sync.Mutex from v1.2.0
-// on, so passing it by value is a copylocks violation.
-type OpcClient interface {
-	GetStatus(ctx context.Context, clientRequestHandle *string, namespace string) (gopcxmlda.TGetStatus, error)
-	Read(ctx context.Context, items []gopcxmlda.TItem, clientRequestHandle *string,
-		clientItemHandles *[]string, namespace string, options map[string]interface{}) (gopcxmlda.TRead, error)
-	Write(ctx context.Context, items []gopcxmlda.TItem, clientRequestHandle *string,
-		clientItemHandles *[]string, namespace string, options map[string]interface{}) (gopcxmlda.TWrite, error)
-	Browse(ctx context.Context, itemPath string, clientRequestHandle *string, namespace string,
-		options gopcxmlda.TBrowseOptions) (gopcxmlda.TBrowse, error)
-}
-
-// Compile-time proof that the interface matches the client it was extracted
-// from. Note the pointer: gopcxmlda.Server has pointer receivers and, from
-// v1.2.0 on, contains a sync.Mutex, so it must not be copied.
-var _ OpcClient = (*gopcxmlda.Server)(nil)
 
 // SessionKind selects the branch a control session runs in.
 type SessionKind string
@@ -47,29 +25,37 @@ const (
 
 // SessionReleaseFunc releases a control session that was reserved but could not
 // be completed. See WithSessionRelease.
-type SessionReleaseFunc func(ctx context.Context, opc OpcClient, plant uint8,
+type SessionReleaseFunc func(ctx context.Context, t Transport, plant uint8,
 	kind SessionKind, privateKey uint16, publicKey uint64) error
 
-// Default polling behaviour for session state transitions: ten attempts at
-// 100 ms, the budget v1 used and that is proven in the field. The transitions
-// are immediate on the server, so a longer budget mostly delays the report of a
-// session that is not going to advance.
+// Default polling behaviour for session state transitions.
 //
-// Unlike in v1 the budget is configurable and the wait is cancellable, so an
-// installation whose SCADA needs longer can raise it with WithSessionPolling.
+// The timeout is a wall-clock deadline and every attempt is a full SOAP round
+// trip, which is why it is five seconds and not the one second an earlier
+// draft used. That draft justified its value as "ten attempts at 100 ms, the
+// budget v1 used and proven in the field" — but v1 polled a fixed eleven times
+// with a sleep in between, independent of latency, whereas a wall-clock budget
+// yields as many attempts as fit inside it. On a SCADA answering in 300 ms,
+// one second bought two or three, and every wait that runs out of budget costs
+// the plant 60 s of session occupancy.
+//
+// minPollAttempts is the other half of that fix: a server slower than the whole
+// budget would otherwise get a single attempt.
 const (
 	defaultPollInterval = 100 * time.Millisecond
-	defaultPollTimeout  = time.Second
+	defaultPollTimeout  = 5 * time.Second
+	minPollAttempts     = 4
 )
 
 // defaultSessionLifetime is the session timeout the ENERCON technical data
 // sheet gives for control access to a single plant (Tab. 81).
 //
-// It is the hard ceiling on everything a command may wait for: once it has
-// elapsed the server has dropped the session, so no further state transition
-// can occur and no write can still be committed. Every wait inside a session is
-// clamped to it, which is what keeps the per-transition polling budget from
-// adding up past the point where the session still exists.
+// It is the hard ceiling on everything a command may wait for once a session
+// exists: after it has elapsed the server has dropped the session, so no
+// further state transition can occur and no write can still be committed.
+// Every wait inside a session is clamped to it, and it overrides
+// minPollAttempts — a guaranteed attempt on a session that is gone is not worth
+// guaranteeing.
 const defaultSessionLifetime = 60 * time.Second
 
 // Client issues commands to the turbines of one park.
@@ -86,15 +72,18 @@ const defaultSessionLifetime = 60 * time.Second
 // is the intended way to use it, since a Client owns one park. It cannot cover
 // a second process; that is what the session id verification is for.
 type Client struct {
-	opc                 OpcClient
-	log                 *slog.Logger
-	pollInterval        time.Duration
-	pollTimeout         time.Duration
-	sessionLifetime     time.Duration
-	maxStateAge         time.Duration
-	lenientVerification bool
-	release             SessionReleaseFunc
-	now                 func() time.Time
+	transport                Transport
+	items                    itemNamer
+	log                      *slog.Logger
+	pollInterval             time.Duration
+	pollTimeout              time.Duration
+	sessionLifetime          time.Duration
+	commandTimeout           time.Duration
+	maxStateAge              time.Duration
+	lenientWriteConfirmation bool
+	lenientSessionVerify     bool
+	release                  SessionReleaseFunc
+	now                      func() time.Time
 
 	// inFlight holds one channel per plant that a command currently owns. It is
 	// closed when the command finishes, which wakes everyone waiting for that
@@ -103,40 +92,72 @@ type Client struct {
 	inFlight map[uint8]chan struct{}
 }
 
+// config is what the options collected. Options record what the caller asked
+// for and never reconcile anything themselves, so that no option's effect can
+// depend on the order the options were given in — an earlier draft clamped the
+// polling budget inside the option, and WithSessionPolling followed by
+// WithSessionLifetime therefore produced a different Client than the same two
+// the other way round.
+type config struct {
+	itemRoot                 string
+	log                      *slog.Logger
+	pollInterval             time.Duration
+	pollTimeout              time.Duration
+	sessionLifetime          time.Duration
+	commandTimeout           time.Duration
+	maxStateAge              time.Duration
+	lenientWriteConfirmation bool
+	lenientSessionVerify     bool
+	release                  SessionReleaseFunc
+	now                      func() time.Time
+	errs                     []error
+}
+
+func (cfg *config) reject(format string, args ...any) {
+	cfg.errs = append(cfg.errs, fmt.Errorf("%w: %s", ErrInvalidOption, fmt.Sprintf(format, args...)))
+}
+
 // Option configures a Client.
-type Option func(*Client)
+type Option func(*config)
 
 // WithLogger attaches a logger. By default the package logs nothing: a library
 // reports through its return values, and v1's LogLevel reconfigured the calling
 // application's global logrus logger as a side effect.
+//
+// A nil logger is ignored rather than rejected, so a caller may pass one
+// straight from a configuration that has not set one up.
 func WithLogger(l *slog.Logger) Option {
-	return func(c *Client) {
+	return func(cfg *config) {
 		if l != nil {
-			c.log = l
+			cfg.log = l
 		}
 	}
 }
 
 // WithSessionPolling sets how often and for how long the client waits for a
-// single session state transition. The default is 100 ms over one second.
+// single session state transition. The default is 100 ms over five seconds.
 //
 // The timeout applies per transition, not per command: a command waits for four
-// of them. What bounds the command as a whole is the session lifetime Enercon
-// documents for control access to a single plant (60 s) — every wait inside a
-// session is clamped to the time left of it, and a timeout larger than the
-// lifetime is clamped to the lifetime, because waiting longer than that means
-// waiting on a session the server has already dropped.
+// of them. It is a wall-clock deadline and every attempt is a round trip, so a
+// slow SCADA gets fewer attempts out of the same budget — a minimum of four is
+// made regardless. What bounds a command once a session exists is the session
+// lifetime Enercon documents for control access to a single plant (60 s): every
+// wait inside a session is clamped to the time left of it, and a timeout larger
+// than the lifetime is clamped to the lifetime, because waiting longer than
+// that means waiting on a session the server has already dropped. To bound a
+// command as a whole, including the wait for a free session before any
+// reservation exists, use WithCommandTimeout.
 func WithSessionPolling(interval, timeout time.Duration) Option {
-	return func(c *Client) {
-		if interval > 0 {
-			c.pollInterval = interval
+	return func(cfg *config) {
+		if interval <= 0 {
+			cfg.reject("WithSessionPolling needs a positive interval, got %s", interval)
+			return
 		}
-		if timeout > 0 {
-			if timeout > c.sessionLifetime {
-				timeout = c.sessionLifetime
-			}
-			c.pollTimeout = timeout
+		if timeout <= 0 {
+			cfg.reject("WithSessionPolling needs a positive timeout, got %s", timeout)
+			return
 		}
+		cfg.pollInterval, cfg.pollTimeout = interval, timeout
 	}
 }
 
@@ -157,11 +178,38 @@ func WithSessionPolling(interval, timeout time.Duration) Option {
 // returning item timestamps and on both clocks agreeing. Enabling it with a
 // value well above the SCADA's own update cycle (a few seconds) is recommended
 // for production use.
+//
+// It does two things, and the second is the one that matters more. Every read
+// carries the age as the MaxAge attribute OPC XML-DA defines for it, which
+// obliges the server to fetch a fresh value from the device rather than answer
+// from its cache — that *prevents* a stale value. The timestamp check then
+// *detects* one that arrives anyway, which is the part that depends on the
+// server filling ItemTime and on both clocks agreeing. A server that ignores
+// MaxAge is still caught by the second.
+//
+// MaxAge is an xs:int in milliseconds, so the largest value this option accepts
+// is math.MaxInt32 milliseconds, about 24 days. Sub-millisecond durations round
+// down to a device read, which is the strictest thing the attribute expresses.
 func WithMaxStateAge(d time.Duration) Option {
-	return func(c *Client) { c.maxStateAge = d }
+	return func(cfg *config) {
+		if d < 0 {
+			cfg.reject("WithMaxStateAge cannot be negative, got %s", d)
+			return
+		}
+		if d > maxStateAgeLimit {
+			cfg.reject("WithMaxStateAge is at most %s (the MaxAge attribute is an xs:int "+
+				"in milliseconds), got %s", maxStateAgeLimit, d)
+			return
+		}
+		cfg.maxStateAge = d
+	}
 }
 
-// WithLenientVerification accepts a written item that the server did not
+// maxStateAgeLimit is the largest age that fits the MaxAge attribute, which the
+// specification types as an xs:int counting milliseconds.
+const maxStateAgeLimit = time.Duration(math.MaxInt32) * time.Millisecond
+
+// WithLenientWriteConfirmation accepts a written item that the server did not
 // confirm in its WriteResponse.
 //
 // By default an item missing from the response is reported as unconfirmed
@@ -170,12 +218,45 @@ func WithMaxStateAge(d time.Duration) Option {
 // per written item. This option exists for a server that genuinely does not
 // echo written items and would otherwise be unusable.
 //
-// It gives up the only evidence a Reset has that SetReset arrived, and for
-// control commands it leaves the value read-back as the sole check. Turn it on
-// only for an installation where the strict behaviour has been shown to reject
-// writes the server did carry out.
+// It gives up the only evidence a Reset has that SetReset arrived. For control
+// commands the value read-back remains as a check — unlike with
+// WithLenientSessionVerification, which gives that up too.
+func WithLenientWriteConfirmation() Option {
+	return func(cfg *config) { cfg.lenientWriteConfirmation = true }
+}
+
+// WithLenientSessionVerification accepts a control session whose id, or whose
+// written value, could not be read back, logging a warning instead of failing
+// the plant with ErrSessionUnverified.
+//
+// It gives up both checks the Enercon session schema requires: that the
+// reserved session belongs to this client, and that it holds the requested
+// command. What remains is the write confirmation. Because the default logger
+// discards everything, a caller enabling this option should attach one with
+// WithLogger, or the warnings go nowhere.
+//
+// A session id read back as zero stays tolerated with or without this option:
+// this package never draws zero, so a zero read-back means the server does not
+// report the id at all.
+func WithLenientSessionVerification() Option {
+	return func(cfg *config) { cfg.lenientSessionVerify = true }
+}
+
+// WithLenientVerification enables both WithLenientWriteConfirmation and
+// WithLenientSessionVerification, for a server that answers none of these
+// reads.
+//
+// It is the widest tolerance this package offers, and it is worth being precise
+// about what is left: nothing confirms that the session commanded was this
+// client's, nothing confirms that it held the requested value, and nothing
+// confirms that the write arrived. Turn it on only for an installation where
+// the strict behaviour has been shown to reject commands the server did carry
+// out, and prefer whichever of the two narrower options is actually needed.
 func WithLenientVerification() Option {
-	return func(c *Client) { c.lenientVerification = true }
+	return func(cfg *config) {
+		cfg.lenientWriteConfirmation = true
+		cfg.lenientSessionVerify = true
+	}
 }
 
 // WithSessionLifetime overrides the session lifetime used to bound the waits
@@ -187,13 +268,59 @@ func WithLenientVerification() Option {
 // bound exists to prevent: waiting on, and writing into, a session that has
 // already expired.
 func WithSessionLifetime(d time.Duration) Option {
-	return func(c *Client) {
-		if d > 0 {
-			c.sessionLifetime = d
-			if c.pollTimeout > d {
-				c.pollTimeout = d
-			}
+	return func(cfg *config) {
+		if d <= 0 {
+			cfg.reject("WithSessionLifetime needs a positive duration, got %s", d)
+			return
 		}
+		cfg.sessionLifetime = d
+	}
+}
+
+// WithCommandTimeout bounds a whole command, including the wait for a free
+// session before any reservation exists.
+//
+// The session lifetime bounds everything from the reservation onwards, but the
+// wait for state "free" happens before there is a session whose lifetime could
+// run out — so with a generous polling budget a command can spend that budget
+// waiting to start and a full session lifetime afterwards. This option is the
+// single figure a scheduler can reason about.
+//
+// The default is 0, which means no limit beyond the caller's own context. The
+// cleanup of a session that was reserved but not completed is not subject to
+// it: it runs on a context of its own, so a command that runs out of time still
+// reports the session it left behind.
+func WithCommandTimeout(d time.Duration) Option {
+	return func(cfg *config) {
+		if d <= 0 {
+			cfg.reject("WithCommandTimeout needs a positive duration, got %s", d)
+			return
+		}
+		cfg.commandTimeout = d
+	}
+}
+
+// WithItemRoot points the client at a different root of the SCADA address
+// space. The default is "Loc", which is what the ENERCON technical data sheet
+// documents: the park number at Loc/LocNo and the plants below Loc/Wec.
+//
+// Everything below the root — the Wec branch, the Plant<n> nodes, the Ctrl and
+// Reset branches, the item names, and the "/" between them — follows the data
+// sheet and is not configurable. What varies between installations is which
+// branch the park hangs off, and a package that assumes one answers nothing at
+// all on an installation that chose the other: every item comes back missing,
+// for every plant, with no hint as to why.
+//
+// Leading and trailing separators are trimmed; a root that is empty after that
+// is rejected.
+func WithItemRoot(root string) Option {
+	return func(cfg *config) {
+		trimmed := strings.Trim(strings.TrimSpace(root), "/")
+		if trimmed == "" {
+			cfg.reject("WithItemRoot needs a non-empty root, got %q", root)
+			return
+		}
+		cfg.itemRoot = trimmed
 	}
 }
 
@@ -209,28 +336,86 @@ func WithSessionLifetime(d time.Duration) Option {
 // The option remains for installations whose Enercon documentation does define
 // an abort telegram.
 func WithSessionRelease(f SessionReleaseFunc) Option {
-	return func(c *Client) { c.release = f }
+	return func(cfg *config) { cfg.release = f }
 }
 
-// New returns a Client that talks to the park behind opc.
-func New(opc OpcClient, opts ...Option) *Client {
-	c := &Client{
-		opc:             opc,
-		log:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+// New returns a Client that talks to the park behind t. The transport for an
+// Enercon SCADA is opcxmlda.New(server), from the subpackage of the same name.
+//
+// It panics if t is nil or if an option was given an unusable value. Both are
+// programming errors that surface on the first run rather than in production:
+// a Client without a transport used to panic with a nil pointer dereference
+// somewhere inside a session, and an option value out of range used to be
+// discarded without a word. Where the values come from a configuration file,
+// use NewWithOptions and report the error.
+func New(t Transport, opts ...Option) *Client {
+	c, err := NewWithOptions(t, opts...)
+	if err != nil {
+		panic(err.Error())
+	}
+	return c
+}
+
+// NewWithOptions is New but reports an unusable transport or option value
+// instead of panicking.
+func NewWithOptions(t Transport, opts ...Option) (*Client, error) {
+	if t == nil {
+		return nil, errors.New("energontrol: New requires a Transport, got nil")
+	}
+	cfg := config{
+		itemRoot: defaultItemRoot,
+		// slog.DiscardHandler, not a text handler writing to io.Discard: the
+		// latter reports itself as enabled, so a log line's arguments are still
+		// evaluated — and one of them reads the remaining session timeout from
+		// the server. A default that logs nothing should also cost nothing.
+		log:             slog.New(slog.DiscardHandler),
 		pollInterval:    defaultPollInterval,
 		pollTimeout:     defaultPollTimeout,
 		sessionLifetime: defaultSessionLifetime,
 		now:             time.Now,
-		inFlight:        make(map[uint8]chan struct{}),
 	}
 	for _, o := range opts {
-		o(c)
+		if o != nil {
+			o(&cfg)
+		}
 	}
-	// An option may have lowered the lifetime below the polling budget.
-	if c.pollTimeout > c.sessionLifetime {
-		c.pollTimeout = c.sessionLifetime
+	if err := errors.Join(cfg.errs...); err != nil {
+		return nil, err
 	}
-	return c
+	// Reconciled here, once, with every option already applied. Waiting longer
+	// than the session lifetime means waiting on a session the server has
+	// dropped, and which option happened to mention the lifetime last must not
+	// decide the outcome.
+	if cfg.pollTimeout > cfg.sessionLifetime {
+		cfg.pollTimeout = cfg.sessionLifetime
+	}
+	if cfg.pollInterval > cfg.pollTimeout {
+		cfg.pollInterval = cfg.pollTimeout
+	}
+	return &Client{
+		transport:                t,
+		items:                    itemNamer{root: cfg.itemRoot},
+		log:                      cfg.log,
+		pollInterval:             cfg.pollInterval,
+		pollTimeout:              cfg.pollTimeout,
+		sessionLifetime:          cfg.sessionLifetime,
+		commandTimeout:           cfg.commandTimeout,
+		maxStateAge:              cfg.maxStateAge,
+		lenientWriteConfirmation: cfg.lenientWriteConfirmation,
+		lenientSessionVerify:     cfg.lenientSessionVerify,
+		release:                  cfg.release,
+		now:                      cfg.now,
+		inFlight:                 make(map[uint8]chan struct{}),
+	}, nil
+}
+
+// withCommandTimeout applies WithCommandTimeout to a command's context. The
+// returned cancel function is always non-nil.
+func (c *Client) withCommandTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.commandTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, c.commandTimeout)
 }
 
 // lockPlants takes the command lock for every plant in plants and returns the
@@ -244,8 +429,7 @@ func (c *Client) lockPlants(ctx context.Context, plants []uint8) (func(), error)
 	if err := ctxErr(ctx); err != nil {
 		return nil, err
 	}
-	ordered := make([]uint8, len(plants))
-	copy(ordered, plants)
+	ordered := slices.Clone(plants)
 	slices.Sort(ordered)
 
 	held := make([]uint8, 0, len(ordered))
@@ -289,12 +473,11 @@ func (c *Client) lockPlants(ctx context.Context, plants []uint8) (func(), error)
 // (false, nil) for a server that was reachable but suspended, and every caller
 // then propagated a nil error, so the failure was invisible.
 func (c *Client) ServerAvailable(ctx context.Context) error {
-	var handle string
-	status, err := c.opc.GetStatus(ctx, &handle, "")
+	state, err := c.transport.Status(ctx)
 	if err != nil {
-		return wrapf(err, "GetStatus")
+		return err
 	}
-	if s := strings.TrimSpace(status.Response.Result.ServerState); s != serverStateRunning {
+	if s := strings.TrimSpace(state); s != serverStateRunning {
 		// Unlike the per-response check, an empty state is a failure here:
 		// reporting the state is the whole purpose of GetStatus.
 		return &serverStateError{state: s}

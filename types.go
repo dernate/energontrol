@@ -238,8 +238,9 @@ type ControlAndRbhValue struct {
 	// IceDetValue switches the ice warning lamp. It must satisfy Writable.
 	IceDetValue IceDetValue
 	// ForceExplicitCommand requests the exact CtrlValue even when the plant is
-	// already in a different stop state. With it false, any stop state satisfies
-	// a stop request. In v1 this was hardwired to false here while Stop exposed
+	// already in a different stop state. With it false, a stop request is
+	// satisfied by any state at least as stopped as the one asked for — never by
+	// a shallower one. In v1 this was hardwired to false here while Stop exposed
 	// it; it is now explicit in both places.
 	ForceExplicitCommand bool
 }

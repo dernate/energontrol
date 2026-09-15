@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 	"time"
@@ -46,6 +47,10 @@ type sessionCred struct {
 	// the server. Success is reported only for plants where this is true — the
 	// session state alone does not prove that anything was written.
 	valueWritten bool
+	// submitted records that the server confirmed the SessionSubmit write. From
+	// that moment the command may have taken effect, so a later failure is not
+	// evidence that nothing happened.
+	submitted bool
 	// finished is set once the plant completed the whole procedure.
 	finished bool
 }
@@ -98,7 +103,7 @@ type tracker struct {
 	results map[uint8]*PlantResult
 	// written records the parameter items actually written per plant, so they
 	// can be read back before the session is submitted.
-	written map[uint8][]writeItem
+	written map[uint8][]ItemWrite
 	// deadline is the moment the server drops the sessions this run reserved.
 	// It is zero until a reservation was attempted, because before that there
 	// is no session whose lifetime could run out.
@@ -111,7 +116,7 @@ func newTracker(cmds []plantCommand) *tracker {
 		cmd:     make(map[uint8]plantCommand, len(cmds)),
 		cred:    make(map[uint8]*sessionCred, len(cmds)),
 		results: make(map[uint8]*PlantResult, len(cmds)),
-		written: make(map[uint8][]writeItem, len(cmds)),
+		written: make(map[uint8][]ItemWrite, len(cmds)),
 	}
 	for _, c := range cmds {
 		t.order = append(t.order, c.PlantNo)
@@ -185,9 +190,15 @@ func (t *tracker) list() Results {
 type sessionProcedure struct {
 	kind SessionKind
 	// parameterItems returns the items to write while the session is reserved.
+	//
 	// An empty result means nothing would be written, which is treated as a
-	// failure rather than as success.
-	parameterItems func(plant uint8, cmd plantCommand, cred *sessionCred) []writeItem
+	// failure rather than as success. An error means the items could not be
+	// built at all, which is a different statement and gets its own reason: an
+	// earlier draft discarded the error and returned no items, so a public key
+	// that does not fit in a long word was reported to the caller as "nothing
+	// to write" — a substituted reason, in a package whose whole argument is
+	// that a check which cannot be carried out says so.
+	parameterItems func(plant uint8, cmd plantCommand, cred *sessionCred) ([]ItemWrite, error)
 	// verifyParameters reads the written items back before submitting. Enercon
 	// documents SetCtrl, SetRbh and SetIceDet as readable for exactly this
 	// check; it makes no such statement about SetReset.
@@ -210,6 +221,7 @@ func (c *Client) run(ctx context.Context, p sessionProcedure, userID uint64, cmd
 	// rebuilds the result list so that a session left open is visible to the
 	// caller rather than only in the log.
 	defer func() {
+		c.markUncertain(t)
 		c.releaseSessions(ctx, t, p.kind)
 		res = t.list()
 	}()
@@ -269,6 +281,7 @@ func (c *Client) run(ctx context.Context, p sessionProcedure, userID uint64, cmd
 func (c *Client) waitState(ctx context.Context, t *tracker, kind SessionKind, want SessionState) error {
 	deadline := t.waitDeadline(c.now(), c.pollTimeout)
 	var last map[uint8]SessionState
+	attempts := 0
 	for {
 		if err := ctxErr(ctx); err != nil {
 			return err
@@ -285,6 +298,7 @@ func (c *Client) waitState(ctx context.Context, t *tracker, kind SessionKind, wa
 			t.fail(plant, e)
 		}
 		last = states
+		attempts++
 		pending := false
 		for _, plant := range t.active() {
 			if s, ok := states[plant]; ok && !s.satisfies(want) {
@@ -295,7 +309,18 @@ func (c *Client) waitState(ctx context.Context, t *tracker, kind SessionKind, wa
 		if !pending {
 			return nil
 		}
-		if !c.now().Before(deadline) {
+		// The session lifetime is unconditional: once it has run out the server
+		// has dropped the reservation, so no further attempt can achieve
+		// anything. It therefore overrides the minimum attempt count below.
+		if t.expired(c.now()) {
+			break
+		}
+		// The polling budget is a wall-clock deadline and every attempt is a
+		// round trip, so on a SCADA that answers slower than the whole budget
+		// the first attempt would also be the last. A minimum number of
+		// attempts is made regardless — bounded, like everything else, by the
+		// session lifetime above.
+		if attempts >= minPollAttempts && !c.now().Before(deadline) {
 			break
 		}
 		if err := c.sleep(ctx, c.pollInterval); err != nil {
@@ -328,7 +353,7 @@ func (c *Client) sessionStates(ctx context.Context, kind SessionKind, plants []u
 	names := make([]string, len(plants))
 	owner := make(map[string]uint8, len(plants))
 	for i, plant := range plants {
-		names[i] = sessionStateItem(plant, kind)
+		names[i] = c.items.sessionState(plant, kind)
 		owner[names[i]] = plant
 	}
 	values, err := c.readValues(ctx, names)
@@ -363,7 +388,7 @@ func (c *Client) requestSessions(ctx context.Context, t *tracker, kind SessionKi
 		return err
 	}
 	plants := t.active()
-	items := make([]writeItem, 0, len(plants))
+	items := make([]ItemWrite, 0, len(plants))
 	owner := make(map[string]uint8, len(plants))
 	for _, plant := range plants {
 		cred, err := newSessionCred()
@@ -372,9 +397,9 @@ func (c *Client) requestSessions(ctx context.Context, t *tracker, kind SessionKi
 			continue
 		}
 		t.cred[plant] = cred
-		name := sessionRequestItem(plant, kind)
+		name := c.items.sessionRequest(plant, kind)
 		owner[name] = plant
-		items = append(items, writeItem{
+		items = append(items, ItemWrite{
 			Name:  name,
 			Value: []uint32{uint32(cred.sessionID), user, uint32(cred.privateKey)},
 		})
@@ -407,7 +432,7 @@ func (c *Client) fetchPublicKeys(ctx context.Context, t *tracker, kind SessionKi
 	names := make([]string, len(plants))
 	owner := make(map[string]uint8, len(plants))
 	for i, plant := range plants {
-		names[i] = sessionPubKeyItem(plant, kind)
+		names[i] = c.items.sessionPubKey(plant, kind)
 		owner[names[i]] = plant
 	}
 	values, err := c.readValues(ctx, names)
@@ -441,7 +466,7 @@ func (c *Client) fetchPublicKeys(ctx context.Context, t *tracker, kind SessionKi
 // writeParameters writes the actual command value of every active plant, in one
 // request.
 func (c *Client) writeParameters(ctx context.Context, t *tracker, p sessionProcedure) error {
-	var items []writeItem
+	var items []ItemWrite
 	owners := make(map[string]uint8)
 	written := make(map[uint8][]string)
 	for _, plant := range t.active() {
@@ -450,7 +475,11 @@ func (c *Client) writeParameters(ctx context.Context, t *tracker, p sessionProce
 			t.fail(plant, fmt.Errorf("energontrol: plant %d: no session credentials", plant))
 			continue
 		}
-		pending := p.parameterItems(plant, t.cmd[plant], cred)
+		pending, err := p.parameterItems(plant, t.cmd[plant], cred)
+		if err != nil {
+			t.fail(plant, fmt.Errorf("energontrol: plant %d: %w", plant, err))
+			continue
+		}
 		if len(pending) == 0 {
 			t.fail(plant, fmt.Errorf("energontrol: plant %d: nothing to write", plant))
 			continue
@@ -490,7 +519,7 @@ func (c *Client) writeParameters(ctx context.Context, t *tracker, p sessionProce
 // request.
 func (c *Client) submitSessions(ctx context.Context, t *tracker, kind SessionKind) error {
 	plants := t.active()
-	items := make([]writeItem, 0, len(plants))
+	items := make([]ItemWrite, 0, len(plants))
 	owner := make(map[string]uint8, len(plants))
 	for _, plant := range plants {
 		cred := t.cred[plant]
@@ -498,14 +527,14 @@ func (c *Client) submitSessions(ctx context.Context, t *tracker, kind SessionKin
 			t.fail(plant, fmt.Errorf("energontrol: plant %d: no session credentials", plant))
 			continue
 		}
-		name := sessionSubmitItem(plant, kind)
+		name := c.items.sessionSubmit(plant, kind)
 		owner[name] = plant
 		pub, err := longWord(cred.publicKey, "public key")
 		if err != nil {
 			t.fail(plant, err)
 			continue
 		}
-		items = append(items, writeItem{
+		items = append(items, ItemWrite{
 			Name:  name,
 			Value: []uint32{uint32(cred.privateKey), pub},
 		})
@@ -515,11 +544,44 @@ func (c *Client) submitSessions(ctx context.Context, t *tracker, kind SessionKin
 		return err
 	}
 	for name, e := range results {
+		plant := owner[name]
 		if e != nil {
-			t.fail(owner[name], e)
+			t.fail(plant, e)
+			continue
+		}
+		// The server took the submit. Whatever fails after this, the command
+		// may have taken effect, and the plant's result has to say so rather
+		// than invite a retry. See markUncertain.
+		if cred := t.cred[plant]; cred != nil {
+			cred.submitted = true
 		}
 	}
 	return nil
+}
+
+// markUncertain flags every plant whose submit the server confirmed but which
+// did not complete the procedure.
+//
+// A command that fails after the submit was written and confirmed may
+// nevertheless have taken effect: the server holds the value and has committed
+// it, and only the confirmation that the session wound down is missing.
+// Reporting that as a plain failure invites a retry, and a retry of a Start or
+// a Reset is a second command to a plant that may already have had one — a Stop
+// is protected by the 360 s delay before a new reservation, those two are not.
+//
+// It runs on every exit path of run, after the success pass, so a plant that
+// did complete is already marked finished and is left alone.
+func (c *Client) markUncertain(t *tracker) {
+	for _, plant := range t.order {
+		cred := t.cred[plant]
+		if cred == nil || !cred.submitted || cred.finished {
+			continue
+		}
+		if t.results[plant].Err == nil {
+			continue
+		}
+		t.fail(plant, ErrOutcomeUncertain)
+	}
 }
 
 // verifySession checks that the reserved session is this client's own, and
@@ -555,7 +617,7 @@ func (c *Client) verifySession(ctx context.Context, t *tracker, kind SessionKind
 	}
 	var names []string
 	for _, plant := range plants {
-		names = append(names, sessionRequestItem(plant, kind))
+		names = append(names, c.items.sessionRequest(plant, kind))
 		if checkParameters {
 			for _, w := range t.written[plant] {
 				names = append(names, w.Name)
@@ -568,10 +630,10 @@ func (c *Client) verifySession(ctx context.Context, t *tracker, kind SessionKind
 	}
 	for _, plant := range plants {
 		cred := t.cred[plant]
-		got := values[sessionRequestItem(plant, kind)]
+		got := values[c.items.sessionRequest(plant, kind)]
 		switch {
 		case got.Err != nil:
-			if c.lenientVerification {
+			if c.lenientSessionVerify {
 				c.log.Warn("cannot read back the session id",
 					"plant", plant, "kind", string(kind), "err", got.Err)
 				break
@@ -605,7 +667,7 @@ func (c *Client) verifyParameters(t *tracker, plant uint8, values map[string]arr
 	for _, w := range t.written[plant] {
 		readBack := values[w.Name]
 		if readBack.Err != nil {
-			if c.lenientVerification {
+			if c.lenientSessionVerify {
 				c.log.Warn("cannot read back a written value",
 					"plant", plant, "item", w.Name, "err", readBack.Err)
 				continue
@@ -615,7 +677,7 @@ func (c *Client) verifyParameters(t *tracker, plant uint8, values map[string]arr
 			return
 		}
 		if len(readBack.Values) == 0 {
-			if c.lenientVerification {
+			if c.lenientSessionVerify {
 				c.log.Warn("written value read back empty", "plant", plant, "item", w.Name)
 				continue
 			}
@@ -632,6 +694,26 @@ func (c *Client) verifyParameters(t *tracker, plant uint8, values map[string]arr
 			t.fail(plant, fmt.Errorf("%w: %s holds %d, this client wrote %d",
 				ErrParameterNotAccepted, w.Name, readBack.Values[0], w.Value[0]))
 			return
+		}
+		// Comparing the value alone proves nothing when that value is zero:
+		// CtrlStart, RbhSetStandard and IceDetLampOff all write 0, and an item
+		// that was never written reads back exactly the same. The private key
+		// is never drawn as zero, so where the server reports it back it is
+		// what shows that the value in the session is this client's.
+		switch {
+		case len(readBack.Values) > 1 && len(w.Value) > 1 && readBack.Values[1] != 0:
+			if readBack.Values[1] != uint64(w.Value[1]) {
+				t.fail(plant, fmt.Errorf("%w: %s holds private key %d, this client wrote %d",
+					ErrParameterNotAccepted, w.Name, readBack.Values[1], w.Value[1]))
+				return
+			}
+		case w.Value[0] == 0:
+			// The server does not report the key back, so the read-back cannot
+			// distinguish this write from an untouched item. The write
+			// confirmation is the remaining evidence; say so rather than count
+			// a check that established nothing.
+			c.log.Warn("read-back cannot confirm a value of zero; the write confirmation is the only evidence",
+				"plant", plant, "item", w.Name)
 		}
 	}
 }
@@ -688,7 +770,7 @@ func (c *Client) releaseSessions(ctx context.Context, t *tracker, kind SessionKi
 		}
 		if c.release != nil {
 			cred := t.cred[plant]
-			if err := c.release(rctx, c.opc, plant, kind, cred.privateKey, cred.publicKey); err != nil {
+			if err := c.release(rctx, c.transport, plant, kind, cred.privateKey, cred.publicKey); err != nil {
 				c.log.Warn("session release failed", "plant", plant, "kind", string(kind), "err", err)
 				t.fail(plant, fmt.Errorf("%w: release failed: %w", ErrSessionLeftOpen, err))
 				continue
@@ -696,9 +778,16 @@ func (c *Client) releaseSessions(ctx context.Context, t *tracker, kind SessionKi
 			c.log.Info("session released", "plant", plant, "kind", string(kind))
 			continue
 		}
-		c.log.Warn("control session left open; it expires on the server's timeout",
-			"plant", plant, "kind", string(kind), "state", state.String(),
-			"timeoutRemaining", c.sessionTimeoutRemaining(rctx, plant, kind))
+		// Reading the remaining timeout is diagnosis, and Go evaluates a call
+		// argument whether or not the handler keeps the record — so with the
+		// default logger, which discards everything, every left-open session
+		// used to cost an extra OPC read nobody would ever see, at the moment
+		// the server was already in trouble.
+		if c.log.Enabled(rctx, slog.LevelWarn) {
+			c.log.Warn("control session left open; it expires on the server's timeout",
+				"plant", plant, "kind", string(kind), "state", state.String(),
+				"timeoutRemaining", c.sessionTimeoutRemaining(rctx, plant, kind))
+		}
 		t.fail(plant, ErrSessionLeftOpen)
 	}
 }
@@ -707,7 +796,7 @@ func (c *Client) releaseSessions(ctx context.Context, t *tracker, kind SessionKi
 // of the session timeout is left. It is diagnostic only: a failure to read it
 // must not turn into a failure of the command.
 func (c *Client) sessionTimeoutRemaining(ctx context.Context, plant uint8, kind SessionKind) string {
-	name := sessionTimeoutItem(plant, kind)
+	name := c.items.sessionTimeout(plant, kind)
 	values, err := c.readValues(ctx, []string{name})
 	if err != nil {
 		return "unknown"
@@ -737,32 +826,32 @@ func (c *Client) sleep(ctx context.Context, d time.Duration) error {
 func (c *Client) controlProcedure(ctx context.Context, userID uint64, cmds []plantCommand) Results {
 	return c.run(ctx, sessionProcedure{
 		kind: SessionCtrl,
-		parameterItems: func(plant uint8, cmd plantCommand, cred *sessionCred) []writeItem {
+		parameterItems: func(plant uint8, cmd plantCommand, cred *sessionCred) ([]ItemWrite, error) {
 			pub, err := longWord(cred.publicKey, "public key")
 			if err != nil {
-				return nil
+				return nil, err
 			}
 			priv := uint32(cred.privateKey)
-			var items []writeItem
+			var items []ItemWrite
 			if cmd.SetCtrl {
-				items = append(items, writeItem{
-					Name:  setCtrlItem(plant),
+				items = append(items, ItemWrite{
+					Name:  c.items.setCtrl(plant),
 					Value: []uint32{uint32(cmd.CtrlValue), priv, pub},
 				})
 			}
 			if cmd.SetRbh {
-				items = append(items, writeItem{
-					Name:  setRbhItem(plant),
+				items = append(items, ItemWrite{
+					Name:  c.items.setRbh(plant),
 					Value: []uint32{uint32(cmd.RbhValue), priv, pub},
 				})
 			}
 			if cmd.SetIceDet {
-				items = append(items, writeItem{
-					Name:  setIceDetItem(plant),
+				items = append(items, ItemWrite{
+					Name:  c.items.setIceDet(plant),
 					Value: []uint32{uint32(cmd.IceDetValue), priv, pub},
 				})
 			}
-			return items
+			return items, nil
 		},
 		verifyParameters: true,
 	}, userID, cmds)
@@ -774,15 +863,15 @@ func (c *Client) controlProcedure(ctx context.Context, userID uint64, cmds []pla
 func (c *Client) resetProcedure(ctx context.Context, userID uint64, cmds []plantCommand) Results {
 	return c.run(ctx, sessionProcedure{
 		kind: SessionReset,
-		parameterItems: func(plant uint8, _ plantCommand, cred *sessionCred) []writeItem {
+		parameterItems: func(plant uint8, _ plantCommand, cred *sessionCred) ([]ItemWrite, error) {
 			pub, err := longWord(cred.publicKey, "public key")
 			if err != nil {
-				return nil
+				return nil, err
 			}
-			return []writeItem{{
-				Name:  setResetItem(plant),
+			return []ItemWrite{{
+				Name:  c.items.setReset(plant),
 				Value: []uint32{uint32(plant), uint32(cred.privateKey), pub},
-			}}
+			}}, nil
 		},
 	}, userID, cmds)
 }

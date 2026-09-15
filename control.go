@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 )
 
 // PlantCtrlState reads the control state of the given plants.
@@ -79,7 +80,7 @@ func (c *Client) readCtrlStates(ctx context.Context, plants []uint8) (
 	names := make([]string, len(plants))
 	owner := make(map[string]uint8, len(plants))
 	for i, p := range plants {
-		names[i] = ctrlItem(p)
+		names[i] = c.items.ctrl(p)
 		owner[names[i]] = p
 	}
 	values, err := c.readValues(ctx, names)
@@ -100,12 +101,12 @@ func (c *Client) readCtrlStates(ctx context.Context, plants []uint8) (
 
 func (c *Client) readIceDetStates(ctx context.Context, plants []uint8) (
 	map[uint8]uint64, map[uint8]error, error) {
-	return c.readPlantWords(ctx, plants, iceDetItem)
+	return c.readPlantWords(ctx, plants, c.items.iceDet)
 }
 
 func (c *Client) readRbhStates(ctx context.Context, plants []uint8) (
 	map[uint8]uint64, map[uint8]error, error) {
-	return c.readPlantWords(ctx, plants, rbhItem)
+	return c.readPlantWords(ctx, plants, c.items.rbh)
 }
 
 // readPlantWords reads one scalar item per plant in a single request. The
@@ -147,10 +148,14 @@ func (c *Client) Start(ctx context.Context, userID uint64, plants ...uint8) (Res
 
 // Stop stops the given plants. fullStop selects a 90° stop over a 60° stop.
 //
-// With forceExplicitCommand false any stop state satisfies the request, so a
-// plant already stopped by Enercon counts as stopped. With it true the plant
-// must reach exactly the requested stop state, and a plant under Enercon control
-// yields OutcomeNotPermitted instead of an attempt that cannot succeed.
+// With forceExplicitCommand false, the request is satisfied by any state at
+// least as stopped as the one asked for, so a plant Enercon already stopped
+// counts as stopped and a plant at 90° satisfies a request for 60°. A shallower
+// stop does not satisfy a deeper one: a plant idling at 60° is commanded to 90°
+// when fullStop is set. With forceExplicitCommand true the plant must have
+// visibly carried out the command — see CtrlValue.Reached — and a plant under
+// Enercon control yields OutcomeNotPermitted instead of an attempt that cannot
+// succeed.
 //
 // A plant in CtrlCommError is never reported as stopped: its state is unknown.
 func (c *Client) Stop(ctx context.Context, userID uint64, fullStop, forceExplicitCommand bool,
@@ -173,6 +178,8 @@ func (c *Client) setCtrl(ctx context.Context, userID uint64, want CtrlValue, for
 	if !want.Writable() {
 		return nil, fmt.Errorf("%w: Ctrl value %s", ErrInvalidValue, want)
 	}
+	ctx, cancel := c.withCommandTimeout(ctx)
+	defer cancel()
 	unlock, err := c.lockPlants(ctx, plants)
 	if err != nil {
 		return nil, err
@@ -210,23 +217,28 @@ func (c *Client) setCtrl(ctx context.Context, userID uint64, want CtrlValue, for
 // ctrlSatisfied reports whether a plant in state current already fulfils a
 // request for want.
 //
-// A forced request compares against the state the plant reports once the command
-// has taken effect, not against the command value: a plant never reports the
-// command values 3 to 8, it reports the resulting blade angle. Where the data
-// sheet documents no resulting state — stop for ice detection, stop for shadow
-// flicker — nothing satisfies a forced request and the command is always sent.
+// A forced request wants the command to be visibly carried out, which Reached
+// decides: Ctrl carries the value that was set, so the plant has to report that
+// value.
+//
+// An unforced stop request is satisfied by any state at least as stopped as the
+// one asked for, ranked by blade angle. That is what makes a stop Enercon
+// performed with higher rights count as a stop, and what stops a plant idling at
+// 60° from passing for the 90° full stop. A command that names no blade angle —
+// stop for ice detection, stop for shadow flicker — can be satisfied by nothing,
+// so it is always sent.
 func ctrlSatisfied(current, want CtrlValue, force bool) bool {
+	if force {
+		return current.Reached(want)
+	}
 	if want == CtrlStart {
 		return current == CtrlStart
 	}
-	if force {
-		expected, known := want.expectedCtrlAfter()
-		return known && current == expected
+	wantDepth := want.stopDepth()
+	if wantDepth < 0 {
+		return false
 	}
-	// Any stop state satisfies an unforced stop request, including a stop
-	// Enercon made with higher rights. CtrlCommError is deliberately not a stop
-	// state: the plant is not known to be stopped.
-	return current.Stopped()
+	return current.stopDepth() >= wantDepth
 }
 
 // SetCtrl sends an arbitrary documented control value.
@@ -235,9 +247,11 @@ func ctrlSatisfied(current, want CtrlValue, force bool) bool {
 // reach the rest of the set Enercon defines for SetCtrl — the gradient stops and
 // the stops for ice detection, shadow flicker and species protection.
 //
-// forceExplicitCommand has the same meaning as in Stop: with it false, any stop
-// state satisfies a stop request; with it true the plant must report the state
-// the command produces.
+// forceExplicitCommand has the same meaning as in Stop: with it false, a stop
+// request is satisfied by any state at least as stopped as the one the command
+// produces; with it true the plant must report exactly that state. The stops for
+// ice detection and shadow flicker have no documented resulting state, so they
+// are always sent.
 func (c *Client) SetCtrl(ctx context.Context, userID uint64, value CtrlValue,
 	forceExplicitCommand bool, plants ...uint8) (Results, error) {
 	return c.setCtrl(ctx, userID, value, forceExplicitCommand, plants)
@@ -281,6 +295,8 @@ func (c *Client) setRbh(ctx context.Context, userID uint64, want RbhValue, plant
 	if !want.Writable() {
 		return nil, fmt.Errorf("%w: Rbh value %s", ErrInvalidValue, want)
 	}
+	ctx, cancel := c.withCommandTimeout(ctx)
+	defer cancel()
 	unlock, err := c.lockPlants(ctx, plants)
 	if err != nil {
 		return nil, err
@@ -385,6 +401,8 @@ func (c *Client) setIceDet(ctx context.Context, userID uint64, want IceDetValue,
 	if !want.Writable() {
 		return nil, fmt.Errorf("%w: IceDet value %s", ErrInvalidValue, want)
 	}
+	ctx, cancel := c.withCommandTimeout(ctx)
+	defer cancel()
 	unlock, err := c.lockPlants(ctx, plants)
 	if err != nil {
 		return nil, err
@@ -451,6 +469,8 @@ func (c *Client) ControlAndRbh(ctx context.Context, userID uint64, values Contro
 	if values.SetIceDetValue && !values.IceDetValue.Writable() {
 		return nil, fmt.Errorf("%w: IceDet value %s", ErrInvalidValue, values.IceDetValue)
 	}
+	ctx, cancel := c.withCommandTimeout(ctx)
+	defer cancel()
 	unlock, lockErr := c.lockPlants(ctx, plants)
 	if lockErr != nil {
 		return nil, lockErr
@@ -550,6 +570,8 @@ func (c *Client) Reset(ctx context.Context, userID uint64, plants ...uint8) (Res
 	if err := validateUserID(userID); err != nil {
 		return nil, err
 	}
+	ctx, cancel := c.withCommandTimeout(ctx)
+	defer cancel()
 	unlock, err := c.lockPlants(ctx, plants)
 	if err != nil {
 		return nil, err
@@ -574,8 +596,13 @@ type resultSet struct {
 	by    map[uint8]PlantResult
 }
 
+// newResultSet copies the plant list. It is the caller's variadic slice —
+// client.Start(ctx, id, plants...) passes its own backing array — and the order
+// results are reported in is read from it after the command has finished, so a
+// caller reusing the slice would otherwise get results attributed to plants it
+// never asked about. lockPlants copies for the same reason.
 func newResultSet(plants []uint8) *resultSet {
-	return &resultSet{order: plants, by: make(map[uint8]PlantResult, len(plants))}
+	return &resultSet{order: slices.Clone(plants), by: make(map[uint8]PlantResult, len(plants))}
 }
 
 func (r *resultSet) set(res PlantResult) { r.by[res.PlantNo] = res }
