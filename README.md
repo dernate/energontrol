@@ -97,11 +97,13 @@ started, err := client.Start(context.Background(), UserId, PlantNo...)
 
 ### Stop(Context, UserId, FullStop, ForceExplicitCommand, PlantNo...)
 Stop one or more turbines. FullStop can be false for 60° stop or true for 90° Stop.
-If ForceExplicitCommand is false, then any stop status at least as stopped as the
-requested one is accepted.
+If ForceExplicitCommand is false, then a stop deeper than the requested one is
+accepted, as is a stop Enercon holds the plant in.
 (For example: Requested status Stop60, but the plant is already at Stop90, then it is
 not stopped at Stop60, but Stop90 is accepted. The other way round it *is* stopped:
-a plant at Stop60 is taken to Stop90.)
+a plant at Stop60 is taken to Stop90. A plant stopped at 60° by a gradient or
+species-protection stop is taken to the plain Stop60 — same blade angle, different
+operating mode.)
 If ForceExplicitCommand is true, then the plant is stopped at the requested status,
 even if the plant is in a similar status.
 

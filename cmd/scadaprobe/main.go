@@ -623,10 +623,19 @@ func (a *app) runOperation(ctx context.Context, op operation) error {
 		"took", elapsed.String(), "written", written,
 		"inRequestedState", res.InRequestedState(), "results", resultsTrace(res))
 
+	// Only the plants something was written for. A plant reported as already in
+	// state has nothing to monitor, and a live run showed what waiting for it
+	// anyway looks like: a minute of polling a state that was never requested
+	// of the plant.
+	watch := worthWatching(res)
+	if skipped := len(res) - len(watch); skipped > 0 {
+		a.r.note(fmt.Sprintf("%d of %d plants had nothing written, so there is nothing "+
+			"to wait for there", skipped, len(res)))
+	}
 	if expect := op.expect; expect != nil {
-		a.settle(ctx, *expect)
+		a.settle(ctx, *expect, watch)
 	} else if a.expectOverride != nil {
-		a.settle(ctx, *a.expectOverride)
+		a.settle(ctx, *a.expectOverride, watch)
 	}
 	a.r.note("Nothing was restored: what the plants should be set to is the operator's " +
 		"call. The state before the command is printed above.")
@@ -674,11 +683,33 @@ func (a *app) reportResults(res energontrol.Results) {
 
 // settle polls the control state until every plant reports what was asked for.
 // This is the monitoring loop the package documentation prescribes.
-func (a *app) settle(ctx context.Context, want energontrol.CtrlValue) {
+// worthWatching is the plants a command may have changed: the ones it wrote to,
+// and the ones where the outcome is uncertain because the submit was confirmed
+// but the wind-down was not.
+//
+// A plant the library reported as already in state is not among them. Nothing
+// was written for it, so there is nothing to wait for — and waiting would be
+// waiting for a state it may legitimately never report: an unforced stop is also
+// satisfied by a deeper stop, and by a stop Enercon holds the plant in.
+func worthWatching(res energontrol.Results) []uint8 {
+	out := make([]uint8, 0, len(res))
+	for _, r := range res {
+		if r.Outcome == energontrol.OutcomeCommanded ||
+			errors.Is(r.Err, energontrol.ErrOutcomeUncertain) {
+			out = append(out, r.PlantNo)
+		}
+	}
+	return out
+}
+
+func (a *app) settle(ctx context.Context, want energontrol.CtrlValue, plants []uint8) {
+	if len(plants) == 0 {
+		return
+	}
 	a.r.section("Waiting for the plants to carry out " + want.String())
 	deadline := time.Now().Add(a.cfg.settleTimeout)
 	for {
-		states, err := a.client.PlantCtrlState(ctx, a.plants...)
+		states, err := a.client.PlantCtrlState(ctx, plants...)
 		if err != nil {
 			a.r.fail("polling the state: " + err.Error())
 			return

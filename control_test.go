@@ -43,10 +43,16 @@ func TestCtrlSatisfied(t *testing.T) {
 		{CtrlStop60Enercon, CtrlStop90, false, false},
 		{CtrlStart, CtrlStop90, false, false},
 		// The gradient and species-protection stops end in the angle they name,
-		// so they are ranked the same way.
+		// so a deeper one still satisfies a shallower request.
 		{CtrlStop90, CtrlGradientStop60, false, true},
 		{CtrlStop60, CtrlGradientStop90, false, false},
-		{CtrlStop60, CtrlStopSpeciesProtection60, false, true},
+		// At the same angle, though, a different command is a different
+		// operating mode and the plant can be commanded, so it is sent.
+		{CtrlStop60, CtrlStopSpeciesProtection60, false, false},
+		{CtrlStopSpeciesProtection60, CtrlStop60, false, false},
+		{CtrlStopSpeciesProtection90, CtrlStop90, false, false},
+		{CtrlGradientStop60, CtrlStopSpeciesProtection60, false, false},
+		{CtrlStopSpeciesProtection90, CtrlStop60, false, true},
 		// Neither a communication error nor a rejected value says where the
 		// blades are, so neither satisfies any stop.
 		{CtrlCommError, CtrlStop90, false, false},
@@ -809,11 +815,12 @@ func TestAPlantReportingTheCommandValueIsHandled(t *testing.T) {
 		}
 	})
 
-	t.Run("it satisfies a stop of the same depth", func(t *testing.T) {
-		// A plant standing at 60° because of a species-protection stop already
-		// fulfils an unforced request for a 60° stop.
+	t.Run("it satisfies a shallower stop request", func(t *testing.T) {
+		// A plant standing at 90° because of a species-protection stop fulfils
+		// an unforced request for a 60° stop: commanding it would open the
+		// blades from 90° back to 60°.
 		f := newFakeOPC()
-		f.Ctrl[4] = uint64(CtrlStopSpeciesProtection60)
+		f.Ctrl[4] = uint64(CtrlStopSpeciesProtection90)
 
 		res, err := New(f).Stop(context.Background(), testUser, false, false, 4)
 		if err != nil {
@@ -823,7 +830,7 @@ func TestAPlantReportingTheCommandValueIsHandled(t *testing.T) {
 			t.Errorf("outcome = %v (%v), want %v", res[0].Outcome, res[0].Err,
 				OutcomeAlreadyInState)
 		}
-		// ...but not a request for the deeper one.
+		// A request for the deeper stop is sent.
 		f = newFakeOPC()
 		f.Ctrl[4] = uint64(CtrlStopSpeciesProtection60)
 		res, err = New(f).Stop(context.Background(), testUser, true, false, 4)
@@ -894,14 +901,97 @@ func TestACommandIsNotReachedByAnotherWithTheSameAngle(t *testing.T) {
 		t.Errorf("SetCtrl was never written; writes: %v", f.WrittenNames())
 	}
 
-	// Unforced, the tolerance still applies: the plant is as stopped as asked.
+	// Unforced it is sent too: the same blade angle by a different command is a
+	// different operating mode, and the plant can be commanded. Only a *deeper*
+	// stop satisfies a request, because commanding that would open the blades.
 	f = newFakeOPC()
 	f.Ctrl[4] = uint64(CtrlStop90)
 	res, err = New(f).SetCtrl(context.Background(), testUser, CtrlGradientStop90, false, 4)
 	if err != nil {
 		t.Fatalf("SetCtrl: %v", err)
 	}
+	if res[0].Outcome != OutcomeCommanded {
+		t.Errorf("unforced: outcome = %v, want %v", res[0].Outcome, OutcomeCommanded)
+	}
+
+	f = newFakeOPC()
+	f.Ctrl[4] = uint64(CtrlStop90)
+	res, err = New(f).SetCtrl(context.Background(), testUser, CtrlGradientStop60, false, 4)
+	if err != nil {
+		t.Fatalf("SetCtrl: %v", err)
+	}
 	if res[0].Outcome != OutcomeAlreadyInState {
-		t.Errorf("unforced: outcome = %v, want %v", res[0].Outcome, OutcomeAlreadyInState)
+		t.Errorf("deeper stop: outcome = %v, want %v", res[0].Outcome, OutcomeAlreadyInState)
+	}
+}
+
+// A plant stopped for species protection at 60° is not "already in" a plain 60°
+// stop. The blades stand at the same angle, but it is a different command and a
+// different operating mode, the plant can be commanded, and the operator asked
+// for the plain stop. Reporting it as already in state left the plant under
+// species protection and wrote nothing.
+//
+// The tolerance an unforced stop exists for is narrower than "same blade angle":
+// do not open the blades of a plant that is more stopped than asked for, and do
+// not fight a stop Enercon made with higher rights.
+func TestADifferentStopAtTheSameAngleIsNotAlreadyInState(t *testing.T) {
+	f := newFakeOPC()
+	f.Ctrl[4] = uint64(CtrlStopSpeciesProtection60)
+
+	res, err := New(f).Stop(context.Background(), testUser, false, false, 4)
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if res[0].Outcome != OutcomeCommanded {
+		t.Errorf("outcome = %v (%v), want %v", res[0].Outcome, res[0].Err, OutcomeCommanded)
+	}
+	if !f.Wrote(setCtrlItem(4)) {
+		t.Errorf("no SetCtrl was written, so the plant stays under species protection; writes: %v",
+			f.WrittenNames())
+	}
+	if got := CtrlValue(f.Ctrl[4]); got != CtrlStop60 {
+		t.Errorf("plant ends at %s, want %s", got, CtrlStop60)
+	}
+}
+
+// Whatever ctrlSatisfied calls satisfied has to be a state from which sending
+// the command would be wrong or impossible — not merely one that looks close
+// enough. Otherwise the library reports a setpoint as reached while the plant
+// sits in a state nobody asked for, which is what a live run hit: "already in
+// state" for a plant under species protection, followed by a minute of waiting
+// for a stop that was never sent.
+func TestWhatSatisfiesARequestIsWrongOrImpossibleToCommand(t *testing.T) {
+	reported := []CtrlValue{
+		CtrlStart, CtrlStop60, CtrlStop90,
+		CtrlGradientStop60, CtrlGradientStop90,
+		CtrlStopIceDetection, CtrlStopShadowFlicker,
+		CtrlStopSpeciesProtection60, CtrlStopSpeciesProtection90,
+		CtrlStop60Enercon, CtrlStopEnercon, CtrlValueRejected, CtrlCommError,
+	}
+	for _, want := range reported {
+		if !want.Writable() {
+			continue // not a command a client may send
+		}
+		for _, current := range reported {
+			if !ctrlSatisfied(current, want, false) {
+				continue
+			}
+			switch {
+			case current.Reached(want):
+				// The command was carried out.
+			case !current.Commandable():
+				// Enercon holds it; a client cannot command it away.
+				if current.stopDepth() < want.stopDepth() {
+					t.Errorf("%s satisfies %s although it is a shallower stop",
+						current, want)
+				}
+			case current.stopDepth() > want.stopDepth():
+				// Deeper: commanding would open the blades back up.
+			default:
+				t.Errorf("%s satisfies a request for %s, but commanding it would be "+
+					"neither wrong nor impossible — so the command has to be sent",
+					current, want)
+			}
+		}
 	}
 }

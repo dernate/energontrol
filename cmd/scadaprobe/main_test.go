@@ -1057,3 +1057,75 @@ func TestAParkReportingTheValueThatWasSetIsUnderstood(t *testing.T) {
 		t.Errorf("plant ends at Ctrl=%d, want 0 (running)", got)
 	}
 }
+
+// The live run this was written from: a plant standing at species protection 60°
+// and a plain 60° stop asked for. The library called it already in state and
+// wrote nothing, and the tool then waited a minute for a state nothing had been
+// requested of. It has to send the command.
+func TestAPlainStopReachesAPlantUnderSpeciesProtection(t *testing.T) {
+	scada := newFakeSCADA()
+	scada.ctrl[2] = 7 // stopped for species protection at 60°
+
+	out, _, err := probeRun(t, scada, config{
+		samples: 0, park: "4242", user: "1234", plants: "2",
+	}, "2\nstop60\nq\n")
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	t.Log("\n" + out)
+
+	if !strings.Contains(out, "plant 2: commanded") {
+		t.Errorf("the plain stop was not sent:\n%s", out)
+	}
+	if strings.Contains(out, "already in state") {
+		t.Errorf("the plant was reported as already in a plain 60° stop:\n%s", out)
+	}
+	if !slices.Contains(scada.wrote(), "Loc/Wec/Plant2/Ctrl/SetCtrl") {
+		t.Errorf("SetCtrl was never written; writes: %v", scada.wrote())
+	}
+	if got := scada.ctrl[2]; got != 1 {
+		t.Errorf("plant ends at Ctrl=%d, want 1 (plain 60° stop)", got)
+	}
+	if !strings.Contains(out, "[ ok ]   every plant has carried out Stop60") {
+		t.Errorf("the stop was not recognised as carried out:\n%s", out)
+	}
+	if strings.Contains(out, "not every plant has carried out") {
+		t.Errorf("the tool warned although the plant reported the stop:\n%s", out)
+	}
+}
+
+// A plant nothing was written for has nothing to monitor. An unforced stop is
+// still satisfied by a deeper stop, and a plant at 90° will never report the 60°
+// that was asked for — waiting for it is waiting for something that is not
+// coming.
+func TestNothingIsWaitedForWhenNothingWasWritten(t *testing.T) {
+	scada := newFakeSCADA()
+	scada.ctrl[2] = 2 // already at 90°, which satisfies a 60° stop
+
+	out, logged, err := probeRun(t, scada, config{
+		samples: 0, park: "4242", user: "1234", plants: "2",
+	}, "2\nstop60\nq\n")
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	t.Log("\n" + out)
+
+	if !strings.Contains(out, "plant 2: already in state") {
+		t.Errorf("a plant at 90° should satisfy a 60° stop:\n%s", out)
+	}
+	if len(scada.wrote()) != 0 {
+		t.Errorf("a plant at 90° must not be opened back to 60°; writes: %v", scada.wrote())
+	}
+	if strings.Contains(out, "Waiting for the plants to carry out") {
+		t.Errorf("nothing was written, so nothing may be waited for:\n%s", out)
+	}
+	if strings.Contains(out, "not every plant has carried out") {
+		t.Errorf("the tool warned about a command it never sent:\n%s", out)
+	}
+	if !strings.Contains(out, "had nothing written") {
+		t.Errorf("the report does not say why there is nothing to wait for:\n%s", out)
+	}
+	if strings.Contains(logged, `"msg":"not settled"`) {
+		t.Error("the log records a failed settle for a command that was never sent")
+	}
+}

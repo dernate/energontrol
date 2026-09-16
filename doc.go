@@ -43,10 +43,11 @@
 //     session id or a written value cannot be read back, the plant fails with
 //     ErrSessionUnverified rather than being reported as commanded on the
 //     strength of a log warning nobody reads.
-//   - A state that is not as far along as the one requested does not satisfy the
-//     request. An unforced stop tolerates a plant that is more stopped than
-//     asked for, including one Enercon stopped itself, but a plant idling at 60°
-//     is commanded on to 90° instead of being reported as already stopped.
+//   - A state satisfies a request only where sending the command would be wrong
+//     or impossible: a deeper stop, whose blades commanding would open back up,
+//     or a stop Enercon holds the plant in. A plant idling at 60° is commanded
+//     on to 90°, and a plant stopped at 60° by a different command is commanded
+//     to the plain stop, rather than either being reported as already stopped.
 //
 // # What a plant reports in Ctrl
 //

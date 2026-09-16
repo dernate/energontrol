@@ -48,10 +48,13 @@ three states its own table lists; it is not a lock-out.
   them by position in the filtered one, so as soon as one plant needed no command
   the others' write was skipped. Success was inferred from the session reaching
   its final state.
-- **An unforced stop accepted a shallower one.** A plant at 60° asked for a 90°
-  full stop returned `OutcomeAlreadyInState` with `InRequestedState() == true` and
-  nothing written. A stop request is now satisfied only by a state at least as
-  stopped as the one asked for, ranked by blade angle.
+- **An unforced stop accepted a state nobody asked for.** A plant at 60° asked
+  for a 90° full stop returned `OutcomeAlreadyInState` with
+  `InRequestedState() == true` and nothing written; so did a plant stopped for
+  species protection at 60° asked for a plain 60° stop, which left it under
+  species protection. A request is satisfied only where sending the command
+  would be wrong or impossible: a *deeper* stop, whose blades commanding would
+  open back up, or a stop Enercon holds the plant in. Anything else is sent.
 - **Plants that could not be commanded were reported as commanded.** `Start`
   returned success for `CtrlStop60Enercon`, `CtrlStopEnercon` and `CtrlCommError`;
   `Stop` did the same for `CtrlCommError`. Both yield `OutcomeNotPermitted` now.

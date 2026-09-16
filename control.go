@@ -148,14 +148,13 @@ func (c *Client) Start(ctx context.Context, userID uint64, plants ...uint8) (Res
 
 // Stop stops the given plants. fullStop selects a 90° stop over a 60° stop.
 //
-// With forceExplicitCommand false, the request is satisfied by any state at
-// least as stopped as the one asked for, so a plant Enercon already stopped
-// counts as stopped and a plant at 90° satisfies a request for 60°. A shallower
-// stop does not satisfy a deeper one: a plant idling at 60° is commanded to 90°
-// when fullStop is set. With forceExplicitCommand true the plant must have
-// visibly carried out the command — see CtrlValue.Reached — and a plant under
-// Enercon control yields OutcomeNotPermitted instead of an attempt that cannot
-// succeed.
+// With forceExplicitCommand false, the request is also satisfied by a *deeper*
+// stop — a plant at 90° satisfies a request for 60°, since commanding it would
+// open the blades back up — and by a stop Enercon holds the plant in at least
+// as deep as the one asked for. Nothing else: a plant idling at 60° is commanded
+// on to 90° when fullStop is set, and a plant stopped at 60° by some other
+// command is commanded to the plain stop. With forceExplicitCommand true the
+// plant must have carried out exactly this command; see CtrlValue.Reached.
 //
 // A plant in CtrlCommError is never reported as stopped: its state is unknown.
 func (c *Client) Stop(ctx context.Context, userID uint64, fullStop, forceExplicitCommand bool,
@@ -215,30 +214,42 @@ func (c *Client) setCtrl(ctx context.Context, userID uint64, want CtrlValue, for
 }
 
 // ctrlSatisfied reports whether a plant in state current already fulfils a
-// request for want.
+// request for want — that is, whether sending the command would be wrong or
+// impossible rather than merely redundant.
 //
-// A forced request wants the command to be visibly carried out, which Reached
-// decides: Ctrl carries the value that was set, so the plant has to report that
-// value.
+// A forced request is satisfied only by the command having been carried out,
+// which Reached decides: Ctrl carries the value that was set.
 //
-// An unforced stop request is satisfied by any state at least as stopped as the
-// one asked for, ranked by blade angle. That is what makes a stop Enercon
-// performed with higher rights count as a stop, and what stops a plant idling at
-// 60° from passing for the 90° full stop. A command that names no blade angle —
-// stop for ice detection, stop for shadow flicker — can be satisfied by nothing,
-// so it is always sent.
+// An unforced request adds the two cases the tolerance exists for, and no
+// others:
+//
+//   - The plant is a *deeper* stop than the one asked for. Commanding it would
+//     open the blades back up, which is not what a caller asking for a stop
+//     wants.
+//   - Enercon holds the plant with higher rights and it is at least as stopped
+//     as asked. A client cannot command it away in any case.
+//
+// A stop at the same blade angle by a *different* command does not satisfy the
+// request: a plant stopped for species protection at 60° is not in a plain 60°
+// stop, the two are different operating modes, and the plant can be commanded.
+// Nor does a state that says nothing about where the blades are, or a command
+// that names no blade angle — stop for ice detection, stop for shadow flicker —
+// which is why those are always sent.
 func ctrlSatisfied(current, want CtrlValue, force bool) bool {
-	if force {
-		return current.Reached(want)
+	if current.Reached(want) {
+		return true
 	}
-	if want == CtrlStart {
-		return current == CtrlStart
+	if force || want == CtrlStart {
+		return false
 	}
 	wantDepth := want.stopDepth()
 	if wantDepth < 0 {
 		return false
 	}
-	return current.stopDepth() >= wantDepth
+	if current == CtrlStop60Enercon || current == CtrlStopEnercon {
+		return current.stopDepth() >= wantDepth
+	}
+	return current.stopDepth() > wantDepth
 }
 
 // SetCtrl sends an arbitrary documented control value.
@@ -248,10 +259,10 @@ func ctrlSatisfied(current, want CtrlValue, force bool) bool {
 // the stops for ice detection, shadow flicker and species protection.
 //
 // forceExplicitCommand has the same meaning as in Stop: with it false, a stop
-// request is satisfied by any state at least as stopped as the one the command
-// produces; with it true the plant must report exactly that state. The stops for
-// ice detection and shadow flicker have no documented resulting state, so they
-// are always sent.
+// request is also satisfied by a deeper stop and by a stop Enercon holds the
+// plant in; with it true the plant must report exactly this command. The stops
+// for ice detection and shadow flicker name no blade angle, so nothing satisfies
+// them and they are always sent.
 func (c *Client) SetCtrl(ctx context.Context, userID uint64, value CtrlValue,
 	forceExplicitCommand bool, plants ...uint8) (Results, error) {
 	return c.setCtrl(ctx, userID, value, forceExplicitCommand, plants)
