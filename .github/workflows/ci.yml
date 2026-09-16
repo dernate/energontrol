@@ -12,22 +12,29 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # go-version rather than go-version-file, deliberately. go.mod now carries
       # a toolchain line so that working *in* this module uses a patched
       # compiler, and setup-go prefers that line over the go line — which would
-      # pin CI to that one patch. What CI should exercise is the newest patch of
-      # the minor the module declares as its minimum, and "1.26.x" with
-      # check-latest does that without anyone editing a file when a patch lands.
+      # pin CI to that one patch. (v6 states this outright: "if the toolchain
+      # directive is present, its version is used".) What CI should exercise is
+      # the newest patch of the minor the module declares as its minimum, and
+      # "1.26.x" with check-latest does that without anyone editing a file when
+      # a patch lands.
       #
       # The cost is that the minor is named here as well as in go.mod. It has to
       # move in both places on a minor bump.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.26.x'
           check-latest: true
           cache: true
+          # From v6 setup-go keys the module cache on go.mod, where v5 used
+          # go.sum. go.sum is the right key here: an indirect dependency can
+          # move without go.mod changing a line, and reusing a cache across
+          # that is how a build passes against modules nobody selected.
+          cache-dependency-path: go.sum
 
       # A library that moves wind turbines does not get to merge unformatted
       # code, and gofmt has no exit status of its own.
