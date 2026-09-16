@@ -1,0 +1,3 @@
+# Normalise line endings: LF in the repository and in the working tree.
+# Keeps Windows editors from reintroducing CRLF, which gofmt reports as unformatted.
+* text=auto eol=lf
