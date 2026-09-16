@@ -1,0 +1,305 @@
+//go:build opc_integration
+
+// These tests send real control commands to real wind turbines. They are behind
+// a build tag and an explicit environment guard, because in v1 they ran on a
+// plain `go test ./...` — a CI job, or the "run all tests" button of an IDE, was
+// enough to start, stop and reset turbines with hard-coded plant numbers.
+//
+// To run them:
+//
+//	export OPC_URL=http://scada.example:8080/DA
+//	export USERID=1234
+//	export PARKNO=5678                       # the park these tests may command
+//	export ENERGONTROL_TEST_PLANTS=2,4       # the plants these tests may command
+//	export ENERGONTROL_ALLOW_LIVE_CONTROL=yes-i-know
+//	go test -tags opc_integration -run TestLive -v ./...
+//
+// Every test verifies the park number before it sends anything, so a set of
+// credentials pointed at the wrong park stops the run instead of commanding
+// somebody else's turbines.
+//
+// The suite lives in a package of its own, which has two consequences worth
+// having. Tests that move real machinery are physically separated from the ones
+// that do not. And only the exported API is reachable from here, so the suite
+// doubles as a standing check that what the library exports is enough to run a
+// park with — the same question doc_test.go asks against a fake, asked against
+// real turbines.
+
+package live
+
+import (
+	"context"
+	"log/slog"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/dernate/energontrol/v2"
+	"github.com/dernate/energontrol/v2/opcxmlda"
+	"github.com/dernate/gopcxmlda"
+	"github.com/joho/godotenv"
+)
+
+type liveEnv struct {
+	client *energontrol.Client
+	server *gopcxmlda.Server
+	userID uint64
+	parkNo uint64
+	plants []uint8
+}
+
+// requireLive builds the live client, or skips the test.
+func requireLive(t *testing.T, commanding bool) liveEnv {
+	t.Helper()
+	_ = godotenv.Load()
+
+	if commanding && os.Getenv("ENERGONTROL_ALLOW_LIVE_CONTROL") != "yes-i-know" {
+		t.Skip("live control commands require ENERGONTROL_ALLOW_LIVE_CONTROL=yes-i-know")
+	}
+	rawURL := os.Getenv("OPC_URL")
+	if rawURL == "" {
+		t.Skip("OPC_URL is not set")
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("OPC_URL: %v", err)
+	}
+	server := &gopcxmlda.Server{Url: parsed, LocaleID: "en-us", Timeout: 10 * time.Second}
+
+	env := liveEnv{
+		client: energontrol.New(opcxmlda.New(server),
+			energontrol.WithLogger(testLogger(t)),
+			energontrol.WithMaxStateAge(60*time.Second)),
+		server: server,
+	}
+	if v := os.Getenv("USERID"); v != "" {
+		if env.userID, err = strconv.ParseUint(v, 10, 64); err != nil {
+			t.Fatalf("USERID: %v", err)
+		}
+	}
+	if v := os.Getenv("PARKNO"); v != "" {
+		if env.parkNo, err = strconv.ParseUint(v, 10, 64); err != nil {
+			t.Fatalf("PARKNO: %v", err)
+		}
+	} else if commanding {
+		t.Skip("PARKNO must name the park these tests may command")
+	}
+	for _, field := range strings.Split(os.Getenv("ENERGONTROL_TEST_PLANTS"), ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		n, err := strconv.ParseUint(field, 10, 8)
+		if err != nil {
+			t.Fatalf("ENERGONTROL_TEST_PLANTS: %v", err)
+		}
+		env.plants = append(env.plants, uint8(n))
+	}
+	if commanding {
+		if len(env.plants) == 0 {
+			t.Skip("ENERGONTROL_TEST_PLANTS must name the plants these tests may command")
+		}
+		// Never command a park other than the one the operator named.
+		match, err := env.client.ParkNoMatch(context.Background(), env.parkNo, true)
+		if err != nil {
+			t.Fatalf("verifying the park number: %v", err)
+		}
+		if !match {
+			t.Fatalf("the server does not serve park %d — refusing to send commands", env.parkNo)
+		}
+	}
+	return env
+}
+
+func TestLiveServerAvailable(t *testing.T) {
+	env := requireLive(t, false)
+	if err := env.client.ServerAvailable(context.Background()); err != nil {
+		t.Fatalf("ServerAvailable: %v", err)
+	}
+}
+
+func TestLiveTurbines(t *testing.T) {
+	env := requireLive(t, false)
+	info, err := env.client.Turbines(context.Background())
+	if err != nil {
+		t.Fatalf("Turbines: %v", err)
+	}
+	t.Logf("park %d, %d plants", info.ParkNo, len(info.PlantNo))
+	for _, p := range info.PlantNo {
+		t.Logf("plant %3d: ctrl=%t rbh=%t reset=%t para=%t icedet=%t",
+			p, info.Ctrl[p], info.Rbh[p], info.Reset[p], info.Para[p], info.IceDet[p])
+	}
+}
+
+func TestLivePlantState(t *testing.T) {
+	env := requireLive(t, false)
+	if len(env.plants) == 0 {
+		t.Skip("ENERGONTROL_TEST_PLANTS is not set")
+	}
+	ctx := context.Background()
+	states, err := env.client.PlantCtrlState(ctx, env.plants...)
+	if err != nil {
+		t.Fatalf("PlantCtrlState: %v", err)
+	}
+	// A reading call reports one entry per plant and puts the reason in Err for
+	// a plant whose state could not be established. Ctrl is meaningless then.
+	for _, s := range states {
+		t.Logf("%s", s)
+	}
+	if err := states.Err(); err != nil {
+		t.Errorf("some plant states could not be read: %v", err)
+	}
+	rbh, err := env.client.PlantRbhState(ctx, env.plants...)
+	if err != nil {
+		t.Fatalf("PlantRbhState: %v", err)
+	}
+	for _, s := range rbh {
+		t.Logf("heating: %s", s)
+	}
+	if err := rbh.Err(); err != nil {
+		t.Errorf("some heating states could not be read: %v", err)
+	}
+	ice, err := env.client.PlantIceDetState(ctx, env.plants...)
+	if err != nil {
+		t.Fatalf("PlantIceDetState: %v", err)
+	}
+	for _, s := range ice {
+		t.Logf("ice detection: %s", s)
+	}
+	if err := ice.Err(); err != nil {
+		t.Errorf("some ice detection states could not be read: %v", err)
+	}
+}
+
+func TestLiveStopThenStart(t *testing.T) {
+	env := requireLive(t, true)
+	ctx := context.Background()
+
+	before, err := env.client.PlantCtrlState(ctx, env.plants...)
+	if err != nil {
+		t.Fatalf("reading the state before the test: %v", err)
+	}
+	// Only command plants whose state was established: restoring a plant whose
+	// state is unknown would be guessing at what to restore it to.
+	if err := before.Err(); err != nil {
+		t.Fatalf("the state of some plants could not be established: %v", err)
+	}
+	t.Cleanup(func() {
+		// Put every plant back the way it was found.
+		for _, s := range before {
+			if s.Err != nil || s.Ctrl != energontrol.CtrlStart {
+				continue
+			}
+			if _, err := env.client.Start(context.Background(), env.userID, s.PlantNo); err != nil {
+				t.Errorf("restoring plant %d: %v", s.PlantNo, err)
+			}
+		}
+	})
+
+	stopped, err := env.client.Stop(ctx, env.userID, true, true, env.plants...)
+	if err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	for _, r := range stopped {
+		t.Logf("stop: %s", r)
+		if !r.InRequestedState() {
+			t.Errorf("plant %d did not stop: %v", r.PlantNo, r.Err)
+		}
+	}
+	assertCtrlState(t, env, energontrol.CtrlStop90)
+
+	started, err := env.client.Start(ctx, env.userID, env.plants...)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, r := range started {
+		t.Logf("start: %s", r)
+	}
+}
+
+func TestLiveRbhCycle(t *testing.T) {
+	env := requireLive(t, true)
+	ctx := context.Background()
+
+	before, err := env.client.PlantRbhState(ctx, env.plants...)
+	if err != nil {
+		t.Fatalf("reading the heating state: %v", err)
+	}
+	if err := before.Err(); err != nil {
+		t.Fatalf("the heating state of some plants could not be established: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := env.client.RbhStandard(context.Background(), env.userID, env.plants...); err != nil {
+			t.Errorf("restoring the heating to standard: %v", err)
+		}
+	})
+	for _, s := range before {
+		t.Logf("heating before: %s", s)
+	}
+	res, err := env.client.RbhOn(ctx, env.userID, env.plants...)
+	if err != nil {
+		t.Fatalf("RbhOn: %v", err)
+	}
+	for _, r := range res {
+		t.Logf("rbh on: %s", r)
+	}
+}
+
+func TestLiveReset(t *testing.T) {
+	env := requireLive(t, true)
+	res, err := env.client.Reset(context.Background(), env.userID, env.plants...)
+	if err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	for _, r := range res {
+		t.Logf("reset: %s", r)
+	}
+}
+
+// assertCtrlState waits for the SCADA to reflect a commanded state.
+//
+// This is the monitoring loop the package documentation prescribes: reaching
+// the end of a session is not evidence that the turbine moved, so the state has
+// to be polled until it reports what was asked for.
+func assertCtrlState(t *testing.T, env liveEnv, want energontrol.CtrlValue) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		states, err := env.client.PlantCtrlState(context.Background(), env.plants...)
+		if err != nil {
+			t.Fatalf("PlantCtrlState: %v", err)
+		}
+		all := true
+		for _, s := range states {
+			// A plant whose state is unknown has not reached the target state:
+			// unknown is never "yes".
+			if s.Err != nil || s.Ctrl != want {
+				all = false
+				t.Logf("%s, waiting for %s", s, want)
+			}
+		}
+		if all {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("plants did not reach %s within the timeout", want)
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// testLogger routes the package's log output into the test log.
+func testLogger(t *testing.T) *slog.Logger {
+	return slog.New(slog.NewTextHandler(testWriter{t}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+type testWriter struct{ t *testing.T }
+
+func (w testWriter) Write(p []byte) (int, error) {
+	w.t.Logf("%s", p)
+	return len(p), nil
+}

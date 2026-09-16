@@ -1,0 +1,49 @@
+# Checked in on purpose. The CI used to run golangci-lint at "latest" with no
+# configuration, so the set of rules a green build had actually passed was
+# whatever that day's release happened to enable by default — and a new release
+# could turn a build red without a line of code changing, or quietly stop
+# checking something the CI comments claimed it checked. The version is pinned
+# in ci.yml; this file pins what it looks at.
+version: "2"
+
+linters:
+  # The v2 default set is errcheck, govet, ineffassign, staticcheck and unused.
+  default: standard
+  enable:
+    # Errors are this package's contract with its caller: every one wraps a
+    # sentinel so a control loop can tell a retryable condition from a
+    # permanent one. errorlint catches the ways that breaks — a comparison
+    # where errors.Is belongs, a type assertion where errors.As belongs, and a
+    # %v where %w was meant, which silently ends a wrap chain.
+    - errorlint
+    # Returning nil while holding a non-nil error is how a failure becomes a
+    # success. In a package that moves turbines that is the single worst bug
+    # shape, and the audit found two variants of it.
+    - nilerr
+    # A switch over CtrlValue, RbhValue or SessionState that has not been
+    # extended along with the constants is a value silently treated as
+    # "something else". A default case still counts as exhaustive, so the
+    # deliberate ones are not flagged.
+    - exhaustive
+    # A duration multiplied by a duration, or compared against a bare integer,
+    # is always a bug and never obvious in review. This package is full of
+    # timing arithmetic.
+    - durationcheck
+    - wastedassign
+    - predeclared
+    - usetesting
+    - misspell
+
+  settings:
+    exhaustive:
+      default-signifies-exhaustive: true
+    errcheck:
+      # Deferred Close on a read-only body and the like still have to be
+      # checked; nothing is excluded beyond the tool's own defaults.
+      check-type-assertions: true
+    misspell:
+      locale: UK
+
+formatters:
+  enable:
+    - gofmt

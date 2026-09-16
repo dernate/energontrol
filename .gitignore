@@ -23,3 +23,9 @@ go.work.sum
 
 .idea
 .env
+
+# scadaprobe writes its run log next to wherever it is started
+*.log
+
+# the compiled diagnostic client, when it is built rather than `go run`
+/scadaprobe
