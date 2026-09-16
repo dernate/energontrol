@@ -741,16 +741,48 @@ func TestEveryDocumentedValueIsOnTheMenu(t *testing.T) {
 		}
 	}
 
+	// The documented sets, stated here rather than read back from the menu:
+	// a yardstick taken from what it measures measures nothing.
 	rbh := labels(groupRbh)
-	for _, c := range rbhChoices() {
-		if !strings.Contains(rbh, fmt.Sprintf("(SetRbh %d)", c.value)) {
-			t.Errorf("no menu entry writes SetRbh %d (%s)", c.value, c.name)
+	for _, v := range []energontrol.RbhValue{
+		energontrol.RbhSetStandard, energontrol.RbhSetAutoOff,
+		energontrol.RbhSetManualOn, energontrol.RbhSetPresetDuration,
+	} {
+		if !strings.Contains(rbh, fmt.Sprintf("(SetRbh %d)", uint64(v))) {
+			t.Errorf("no menu entry writes SetRbh %d (%s)", uint64(v), v)
 		}
 	}
 	lamp := labels(groupIceDet)
-	for _, c := range iceDetChoices() {
-		if !strings.Contains(lamp, fmt.Sprintf("(SetIceDet %d)", c.value)) {
-			t.Errorf("no menu entry writes SetIceDet %d (%s)", c.value, c.name)
+	for _, v := range []energontrol.IceDetValue{
+		energontrol.IceDetLampOff, energontrol.IceDetLampOn,
+	} {
+		if !strings.Contains(lamp, fmt.Sprintf("(SetIceDet %d)", uint64(v))) {
+			t.Errorf("no menu entry writes SetIceDet %d (%s)", uint64(v), v)
+		}
+	}
+
+	// Every entry in the three setter groups carries the raw value it writes,
+	// which is what the combined command's prompts are built from. An entry
+	// without one would silently vanish from those prompts.
+	for _, group := range []string{groupCtrl, groupRbh, groupIceDet} {
+		var withValue int
+		for _, op := range ops {
+			if op.group != group {
+				continue
+			}
+			if op.value == nil {
+				t.Errorf("%s carries no value, so the combined command cannot offer it",
+					op.name)
+				continue
+			}
+			withValue++
+			if !strings.Contains(op.label, fmt.Sprintf(" %d)", *op.value)) {
+				t.Errorf("%s writes %d but its label says otherwise: %s",
+					op.name, *op.value, op.label)
+			}
+		}
+		if got := len(choicesFor(group)); got != withValue {
+			t.Errorf("group %q offers %d choices for %d entries", group, got, withValue)
 		}
 	}
 
@@ -935,7 +967,7 @@ func TestCombinedCommandWritesTheChosenParametersInOneSession(t *testing.T) {
 	// heating value, and the lamp left alone.
 	out, logged, err := probeRun(t, scada, config{
 		samples: 0, park: "4242", user: "1234", plants: "2",
-	}, "17\ncombined\n2\n10\n\nq\n")
+	}, "17\n2\n10\n-\ncombined\nq\n")
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, out)
 	}
@@ -970,19 +1002,113 @@ func TestCombinedCommandWritesTheChosenParametersInOneSession(t *testing.T) {
 	}
 }
 
-// A combined command that selects nothing writes nothing: the library refuses an
-// empty parameter set, and the tool says so before getting there.
-func TestCombinedCommandWithNothingChosenSendsNothing(t *testing.T) {
+// Leaving all three unchanged writes nothing: the library refuses an empty
+// parameter set, and the tool says so before getting there. Both the listed
+// "-" and a bare enter mean unchanged.
+func TestCombinedCommandWithEverythingLeftUnchangedSendsNothing(t *testing.T) {
+	for name, input := range map[string]string{
+		"explicit": "17\n-\n-\n-\nq\n",
+		"enter":    "17\n\n\n\nq\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			scada := newFakeSCADA()
+
+			out, _, err := probeRun(t, scada, config{
+				samples: 0, park: "4242", user: "1234", plants: "2",
+			}, input)
+			if err != nil {
+				t.Fatalf("run: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "all three were left unchanged") {
+				t.Errorf("the tool does not say that nothing was selected:\n%s", out)
+			}
+			if len(scada.wrote()) != 0 {
+				t.Errorf("nothing may be written; writes: %v", scada.wrote())
+			}
+		})
+	}
+}
+
+// Leaving one part unchanged has to be a selection an operator can make, not
+// something inferred from a blank line: "only the control value and the
+// heating" is the case this exists for.
+func TestCombinedCommandLeavesTheUnselectedPartsAlone(t *testing.T) {
+	scada := newFakeSCADA()
+
+	// Ctrl 2, heating 10, lamp left unchanged.
+	out, logged, err := probeRun(t, scada, config{
+		samples: 0, park: "4242", user: "1234", plants: "2",
+	}, "17\n2\n10\n-\ncombined\nq\n")
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	t.Log("\n" + out)
+
+	// Each part is asked for by name, with an option to leave it alone.
+	for _, want := range []string{
+		"Set control value (Ctrl/SetCtrl) to which state?",
+		"Set heating value (Ctrl/SetRbh) to which state?",
+		"Set the ice warning lamp (Ctrl/SetIceDet) to which state?",
+		"-     leave unchanged, write nothing for this one",
+		// The offered values carry the menu's own wording.
+		"stop for species protection at 90° (SetCtrl 8)",
+		"heat for the preset duration (SetRbh 128)",
+		"ice warning lamp on (SetIceDet 8)",
+		// And all three are listed on the confirmation screen.
+		"Control value (SetCtrl)",
+		"stop at 90°, full stop (SetCtrl 2)",
+		"Heating value (SetRbh)",
+		"heating on (SetRbh 10)",
+		"Ice warning lamp (SetIceDet)",
+		"left unchanged",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the prompt does not show %q:\n%s", want, out)
+		}
+	}
+
+	// The selection has to be on screen before the confirmation is asked for,
+	// or the operator is confirming a command whose values they have not seen.
+	// This is the whole point of asking first.
+	confirm := strings.Index(out, `type "combined" to send it`)
+	shown := strings.Index(out, "Control value (SetCtrl)")
+	switch {
+	case confirm < 0:
+		t.Errorf("the confirmation was never asked for:\n%s", out)
+	case shown < 0 || shown > confirm:
+		t.Errorf("the selection is not shown before the confirmation is asked:\n%s", out)
+	}
+
+	wrote := scada.wrote()
+	for _, want := range []string{
+		"Loc/Wec/Plant2/Ctrl/SetCtrl", "Loc/Wec/Plant2/Ctrl/SetRbh",
+	} {
+		if !slices.Contains(wrote, want) {
+			t.Errorf("%s was not written; writes: %v", want, wrote)
+		}
+	}
+	if slices.Contains(wrote, "Loc/Wec/Plant2/Ctrl/SetIceDet") {
+		t.Errorf("the lamp was left unchanged, so nothing may be written for it; writes: %v",
+			wrote)
+	}
+	if !strings.Contains(logged, `"setIceDet":false`) {
+		t.Error("the log does not record that the lamp was left unchanged")
+	}
+}
+
+// A choice that is neither a listed value nor the unchanged key is refused, and
+// the message says both of the things that would have been accepted.
+func TestCombinedCommandRefusesSomethingThatIsNeither(t *testing.T) {
 	scada := newFakeSCADA()
 
 	out, _, err := probeRun(t, scada, config{
 		samples: 0, park: "4242", user: "1234", plants: "2",
-	}, "17\ncombined\n\n\n\nq\n")
+	}, "17\nnope\nq\n")
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "nothing was chosen") {
-		t.Errorf("the tool does not say that nothing was chosen:\n%s", out)
+	if !strings.Contains(out, `"nope" is neither one of the values listed nor "-"`) {
+		t.Errorf("the prompt does not say what would have been accepted:\n%s", out)
 	}
 	if len(scada.wrote()) != 0 {
 		t.Errorf("nothing may be written; writes: %v", scada.wrote())
@@ -996,7 +1122,7 @@ func TestAValueOutsideTheDocumentedSetIsRefusedAtThePrompt(t *testing.T) {
 
 	out, _, err := probeRun(t, scada, config{
 		samples: 0, park: "4242", user: "1234", plants: "2",
-	}, "17\ncombined\n130\nq\n")
+	}, "17\n130\nq\n")
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, out)
 	}

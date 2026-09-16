@@ -442,7 +442,7 @@ the data sheet is:
 | Rotor blade heating (`Ctrl/SetRbh`) | back to automatic (0), suppress automatic (2), heating on (10), preset duration (128) |
 | Ice warning lamp (`Ctrl/SetIceDet`) | off (0), on (8) |
 | Fault acknowledgement (`Reset/SetReset`) | reset |
-| Several parameters in one session | a control value, a heating value and the lamp together; each part optional |
+| Several parameters in one session | a control value, a heating value and the lamp together; each of the three is asked for separately and can be left unchanged |
 
 Every label names the value it writes, so a selection can be checked against the data
 sheet without reading the source.
@@ -450,7 +450,9 @@ sheet without reading the source.
 **Nothing is written until an operation is confirmed.** Choosing one shows what would
 be sent, to which plants, as which user, the state those plants are in right now, and
 what the consequences are — and then asks the operator to type that operation's *name*
-back. A plain `yes` does not send it; neither does the menu key. A command is offered
+back. A plain `yes` does not send it; neither does the menu key. Where an operation
+needs values, they are asked for *before* the confirmation and listed on the
+confirmation screen, so what is being confirmed is always on screen. A command is offered
 at all only when the server confirmed `PARKNO`, `ENERGONTROL_TEST_PLANTS` names the
 plants explicitly, and `USERID` is set. A command never defaults to the whole park.
 

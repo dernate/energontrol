@@ -173,8 +173,11 @@ the package.
 
 `cmd/scadaprobe` is new: it reads and diagnoses a real SCADA, offers every command
 the library can send, and writes nothing until an operation is confirmed by typing
-that operation's name. It found the write-reply decoding defect above. The user id
-is kept out of its log.
+that operation's name. An operation that needs values asks for them before the
+confirmation and lists them on the confirmation screen — the combined command
+asks for each of the control value, the heating value and the lamp separately,
+each of which can be left unchanged. It found the write-reply decoding defect
+above. The user id is kept out of its log.
 
 CI runs `gofmt`, `go vet`, golangci-lint (pinned, with `errorlint`, `nilerr`,
 `exhaustive` and `durationcheck`) and `go test -race` with an 88 % coverage floor.

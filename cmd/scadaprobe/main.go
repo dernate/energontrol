@@ -18,6 +18,10 @@
 //	ENERGONTROL_TEST_PLANTS=2,4 \
 //	    scadaprobe
 //
+// An operation that needs values — the combined command — asks for them before
+// the confirmation and lists them on the confirmation screen, so the operator
+// confirms what will actually be sent rather than that something will be.
+//
 // PARKNO and ENERGONTROL_TEST_PLANTS are what make a command possible at all:
 // the park number is verified against the server before the menu opens, and a
 // command only ever goes to the plants named explicitly. Without them the tool
@@ -173,6 +177,9 @@ type app struct {
 	// know it in advance — the combined command, where the operator picks the
 	// control value at the prompt.
 	expectOverride *energontrol.CtrlValue
+	// combined is what the combined command's prompts gathered, held between
+	// prepare and send so the confirmation screen can show it.
+	combined *energontrol.ControlAndRbhValue
 }
 
 // selection is the plants to act on: the explicit list where there is one, and
@@ -300,6 +307,19 @@ type operation struct {
 	// usesForce marks the operations that pass forceExplicitCommand, so the
 	// confirmation screen only mentions the toggle where it changes anything.
 	usesForce bool
+	// prepare asks for whatever the operation needs to know before the
+	// confirmation, so that the confirmation screen can show what would actually
+	// be sent. Without it the combined command would be confirmed before its
+	// values were chosen, which is not a confirmation of anything. It returns
+	// false if the operator backed out.
+	prepare func(a *app) bool
+	// value is the raw number this operation writes, for the groups where an
+	// operation is exactly one value: the control values, the heating values and
+	// the lamp. The combined command's prompts are built from it, so what they
+	// offer and what the menu offers cannot drift apart. Nil for the fault
+	// acknowledgement and for the combined command itself, which write no single
+	// value of their own.
+	value *uint64
 }
 
 const stopNote = "a plant that was just stopped refuses a new reservation for 360 s, " +
@@ -321,6 +341,7 @@ const (
 // commands, so they are deliberately absent.
 func operations() []operation {
 	want := func(v energontrol.CtrlValue) *energontrol.CtrlValue { return &v }
+	raw := func(v uint64) *uint64 { return &v }
 	ctrl := func(key string, value energontrol.CtrlValue, name, label, note string) operation {
 		// What to wait for afterwards is the command value: Ctrl carries the
 		// value that was set, and the plant holds it. Waiting for the blade
@@ -330,7 +351,7 @@ func operations() []operation {
 		return operation{
 			key: key, name: name, group: groupCtrl, note: note,
 			label:  fmt.Sprintf("%s (SetCtrl %d)", label, uint64(value)),
-			expect: &expect, usesForce: true,
+			expect: &expect, usesForce: true, value: raw(uint64(value)),
 			send: func(ctx context.Context, a *app, p []uint8) (energontrol.Results, error) {
 				return a.client.SetCtrl(ctx, a.userID, value, a.force, p...)
 			},
@@ -347,18 +368,21 @@ func operations() []operation {
 		// three calls most callers use, and exercising them is the point.
 		{key: "1", name: "start", label: "start the plants (SetCtrl 0)", group: groupCtrl,
 			expect: want(energontrol.CtrlStart), usesForce: true,
+			value: raw(uint64(energontrol.CtrlStart)),
 			send: func(ctx context.Context, a *app, p []uint8) (energontrol.Results, error) {
 				return a.client.Start(ctx, a.userID, p...)
 			}},
 		{key: "2", name: "stop60", label: "stop at 60° (SetCtrl 1)", group: groupCtrl,
 			note:   stopNote + "; not available on controller type EP5-CS-03",
 			expect: want(energontrol.CtrlStop60), usesForce: true,
+			value: raw(uint64(energontrol.CtrlStop60)),
 			send: func(ctx context.Context, a *app, p []uint8) (energontrol.Results, error) {
 				return a.client.Stop(ctx, a.userID, false, a.force, p...)
 			}},
 		{key: "3", name: "stop90", label: "stop at 90°, full stop (SetCtrl 2)", group: groupCtrl,
 			note:   stopNote,
 			expect: want(energontrol.CtrlStop90), usesForce: true,
+			value: raw(uint64(energontrol.CtrlStop90)),
 			send: func(ctx context.Context, a *app, p []uint8) (energontrol.Results, error) {
 				return a.client.Stop(ctx, a.userID, true, a.force, p...)
 			}},
@@ -378,16 +402,19 @@ func operations() []operation {
 
 		{key: "10", name: "heating-auto", group: groupRbh,
 			label: "heating back to automatic (SetRbh 0)",
+			value: raw(uint64(energontrol.RbhSetStandard)),
 			send: func(ctx context.Context, a *app, p []uint8) (energontrol.Results, error) {
 				return a.client.RbhStandard(ctx, a.userID, p...)
 			}},
 		{key: "11", name: "heating-autooff", group: groupRbh,
 			label: "suppress automatic heating (SetRbh 2)",
+			value: raw(uint64(energontrol.RbhSetAutoOff)),
 			send: func(ctx context.Context, a *app, p []uint8) (energontrol.Results, error) {
 				return a.client.RbhAutoOff(ctx, a.userID, p...)
 			}},
 		{key: "12", name: "heating-on", group: groupRbh,
 			label: "heating on (SetRbh 10)",
+			value: raw(uint64(energontrol.RbhSetManualOn)),
 			note: "this writes 10, which suppresses the automatic system and heats " +
 				"manually; the bare 8 the data sheet also lists is rejected by the server",
 			send: func(ctx context.Context, a *app, p []uint8) (energontrol.Results, error) {
@@ -395,6 +422,7 @@ func operations() []operation {
 			}},
 		{key: "13", name: "heating-preset", group: groupRbh,
 			label: "heat for the preset duration (SetRbh 128)",
+			value: raw(uint64(energontrol.RbhSetPresetDuration)),
 			note: "Enercon: only possible if the plant has stopped and ice was detected. " +
 				"It is a one-shot action with no status bit of its own, so it is always sent",
 			send: func(ctx context.Context, a *app, p []uint8) (energontrol.Results, error) {
@@ -403,11 +431,13 @@ func operations() []operation {
 
 		{key: "14", name: "lamp-off", group: groupIceDet,
 			label: "ice warning lamp off (SetIceDet 0)",
+			value: raw(uint64(energontrol.IceDetLampOff)),
 			send: func(ctx context.Context, a *app, p []uint8) (energontrol.Results, error) {
 				return a.client.IceDetOff(ctx, a.userID, p...)
 			}},
 		{key: "15", name: "lamp-on", group: groupIceDet,
 			label: "ice warning lamp on (SetIceDet 8)",
+			value: raw(uint64(energontrol.IceDetLampOn)),
 			send: func(ctx context.Context, a *app, p []uint8) (energontrol.Results, error) {
 				return a.client.IceDetOn(ctx, a.userID, p...)
 			}},
@@ -425,12 +455,12 @@ func operations() []operation {
 			note: "one session per plant writes all the chosen parameters, which is the " +
 				"only way to change several at once; the server applies them on submit",
 			usesForce: true,
+			prepare:   func(a *app) bool { return a.askCombined() },
 			send: func(ctx context.Context, a *app, p []uint8) (energontrol.Results, error) {
-				values, ok := a.askCombined()
-				if !ok {
+				if a.combined == nil {
 					return nil, errAborted
 				}
-				return a.client.ControlAndRbh(ctx, a.userID, values, p...)
+				return a.client.ControlAndRbh(ctx, a.userID, *a.combined, p...)
 			}},
 	}
 }
@@ -557,10 +587,19 @@ func (a *app) runOperation(ctx context.Context, op operation) error {
 	}
 
 	a.expectOverride = nil
+	a.combined = nil
 
 	before, err := a.client.PlantCtrlState(ctx, a.plants...)
 	if err != nil {
 		a.r.fail("reading the state before the command: " + err.Error())
+		return errAborted
+	}
+
+	// Whatever the operation needs to know is asked before the confirmation, not
+	// after it: a confirmation of "something will be written here" is worthless.
+	if op.prepare != nil && !op.prepare(a) {
+		a.r.line("aborted — nothing was sent.")
+		a.log.Info("command aborted", "operation", op.name, "reason", "nothing selected")
 		return errAborted
 	}
 
@@ -570,6 +609,14 @@ func (a *app) runOperation(ctx context.Context, op operation) error {
 	a.r.kv("Park", fmt.Sprintf("%d (confirmed by the server)", a.parkNo))
 	a.r.kv("User id", a.cfg.user)
 	a.r.kv("State now", statesLine(before))
+	if v := a.combined; v != nil {
+		a.r.kv("Control value (SetCtrl)", combinedPart(v.SetCtrlValue,
+			uint64(v.CtrlValue), groupCtrl))
+		a.r.kv("Heating value (SetRbh)", combinedPart(v.SetRbhValue,
+			uint64(v.RbhValue), groupRbh))
+		a.r.kv("Ice warning lamp (SetIceDet)", combinedPart(v.SetIceDetValue,
+			uint64(v.IceDetValue), groupIceDet))
+	}
 	if op.usesForce {
 		a.r.kv("forceExplicitCommand", onOff(a.force))
 	}
@@ -746,84 +793,91 @@ func (a *app) settle(ctx context.Context, want energontrol.CtrlValue, plants []u
 // choice is one value a setter accepts, for the prompts that ask which to send.
 type choice struct {
 	value uint64
-	name  string
+	label string
 }
 
-func ctrlChoices() []choice {
+// choicesFor is what the menu offers in one group, as selectable values. Built
+// from operations() so the combined command offers exactly what the individual
+// entries do, with the same wording — including the raw value in each label, so
+// a selection can be checked against the data sheet.
+func choicesFor(group string) []choice {
 	var out []choice
-	for v := energontrol.CtrlStart; v.Writable(); v++ {
-		out = append(out, choice{uint64(v), v.String()})
+	for _, op := range operations() {
+		if op.group == group && op.value != nil {
+			out = append(out, choice{*op.value, op.label})
+		}
 	}
 	return out
 }
 
-func rbhChoices() []choice {
-	return []choice{
-		{uint64(energontrol.RbhSetStandard), energontrol.RbhSetStandard.String()},
-		{uint64(energontrol.RbhSetAutoOff), energontrol.RbhSetAutoOff.String()},
-		{uint64(energontrol.RbhSetManualOn), energontrol.RbhSetManualOn.String()},
-		{uint64(energontrol.RbhSetPresetDuration), energontrol.RbhSetPresetDuration.String()},
-	}
-}
+// unchangedKey is what an operator picks to leave a part of a combined command
+// alone. It is a listed option rather than "press enter", so that leaving
+// something unchanged is a choice made deliberately and visible in the log.
+const unchangedKey = "-"
 
-func iceDetChoices() []choice {
-	return []choice{
-		{uint64(energontrol.IceDetLampOff), energontrol.IceDetLampOff.String()},
-		{uint64(energontrol.IceDetLampOn), energontrol.IceDetLampOn.String()},
-	}
-}
-
-// askChoice lists the values a setter accepts and reads one. chosen is false
-// when the operator skipped the part with a blank line, which only an optional
-// part allows; ok is false when they aborted or input ended.
-func (a *app) askChoice(what string, choices []choice, optional bool) (
+// askChoice asks which state one setter should be put into. With optional true
+// the list carries an entry for leaving it unchanged, and chosen comes back
+// false when that is picked; ok is false when the operator aborted or input
+// ended.
+func (a *app) askChoice(question string, choices []choice, optional bool) (
 	value uint64, chosen, ok bool) {
 
 	a.r.line("")
-	a.r.line("  " + what)
+	a.r.line("  " + question)
+	if optional {
+		a.r.printf("  %-5s leave unchanged, write nothing for this one\n", unchangedKey)
+	}
 	for _, c := range choices {
-		a.r.printf("  %-5d %s\n", c.value, c.name)
+		a.r.printf("  %-5d %s\n", c.value, c.label)
 	}
 	prompt := "value: "
 	if optional {
-		prompt = "value (blank to leave this one alone): "
+		prompt = fmt.Sprintf("value, or %q to leave it unchanged: ", unchangedKey)
 	}
 	line, ok := a.ask(prompt)
 	if !ok {
 		return 0, false, false
 	}
-	if line == "" {
-		if optional {
-			return 0, false, true
-		}
-		a.r.warn("no value given")
-		return 0, false, false
+	if optional && (line == unchangedKey || line == "") {
+		a.log.Info("value left unchanged", "setter", question)
+		a.r.note("left unchanged")
+		return 0, false, true
 	}
 	n, err := strconv.ParseUint(line, 10, 64)
 	if err != nil {
-		a.r.warn(fmt.Sprintf("%q is not a number", line))
+		a.r.warn(fmt.Sprintf("%q is neither one of the values listed nor %q", line, unchangedKey))
 		return 0, false, false
 	}
-	if !slices.ContainsFunc(choices, func(c choice) bool { return c.value == n }) {
+	i := slices.IndexFunc(choices, func(c choice) bool { return c.value == n })
+	if i < 0 {
 		// The library refuses an undocumented value too, but saying so here
 		// names the value the operator typed instead of failing the command.
 		a.r.warn(fmt.Sprintf("%d is not one of the values listed", n))
 		return 0, false, false
 	}
-	a.log.Info("value chosen", "setter", what, "value", n)
+	a.r.note("chose " + choices[i].label)
+	a.log.Info("value chosen", "setter", question, "value", n, "label", choices[i].label)
 	return n, true, true
 }
 
 // askCombined builds the parameter set for one session that writes several
-// items. Each part can be skipped; a set that writes nothing is refused by the
-// library, so this refuses it here with a message the operator can act on.
-func (a *app) askCombined() (energontrol.ControlAndRbhValue, bool) {
+// items. Each of the three is asked for separately and each can be left
+// unchanged, so "only Ctrl and Rbh" is a selection rather than something to be
+// inferred from a blank line. A set that writes nothing is refused here, since
+// the library refuses it too.
+func (a *app) askCombined() bool {
 	var values energontrol.ControlAndRbhValue
 	values.ForceExplicitCommand = a.force
 
-	v, chosen, ok := a.askChoice("control value (Ctrl/SetCtrl)", ctrlChoices(), true)
+	a.r.section("Which parameters should this session write?")
+	a.r.note(fmt.Sprintf("Each of the three is asked separately. %q leaves one unchanged, "+
+		"and nothing is written for it. forceExplicitCommand is %s.",
+		unchangedKey, onOff(a.force)))
+
+	v, chosen, ok := a.askChoice("Set control value (Ctrl/SetCtrl) to which state?",
+		choicesFor(groupCtrl), true)
 	if !ok {
-		return values, false
+		return false
 	}
 	if chosen {
 		values.SetCtrlValue, values.CtrlValue = true, energontrol.CtrlValue(v)
@@ -833,32 +887,50 @@ func (a *app) askCombined() (energontrol.ControlAndRbhValue, bool) {
 		a.expectOverride = &expect
 	}
 
-	v, chosen, ok = a.askChoice("heating value (Ctrl/SetRbh)", rbhChoices(), true)
+	v, chosen, ok = a.askChoice("Set heating value (Ctrl/SetRbh) to which state?",
+		choicesFor(groupRbh), true)
 	if !ok {
-		return values, false
+		return false
 	}
 	if chosen {
 		values.SetRbhValue, values.RbhValue = true, energontrol.RbhValue(v)
 	}
 
-	v, chosen, ok = a.askChoice("ice warning lamp (Ctrl/SetIceDet)", iceDetChoices(), true)
+	v, chosen, ok = a.askChoice("Set the ice warning lamp (Ctrl/SetIceDet) to which state?",
+		choicesFor(groupIceDet), true)
 	if !ok {
-		return values, false
+		return false
 	}
 	if chosen {
 		values.SetIceDetValue, values.IceDetValue = true, energontrol.IceDetValue(v)
 	}
 
 	if !values.SetCtrlValue && !values.SetRbhValue && !values.SetIceDetValue {
-		a.r.warn("nothing was chosen, so there is nothing to send")
-		return values, false
+		a.r.warn("all three were left unchanged, so there is nothing to send")
+		return false
 	}
+
+	// Held for the confirmation screen, which lists all three together.
+	a.combined = &values
 	a.log.Info("combined command built",
 		"setCtrl", values.SetCtrlValue, "ctrl", uint64(values.CtrlValue),
 		"setRbh", values.SetRbhValue, "rbh", uint64(values.RbhValue),
 		"setIceDet", values.SetIceDetValue, "iceDet", uint64(values.IceDetValue),
 		"forceExplicitCommand", values.ForceExplicitCommand)
-	return values, true
+	return true
+}
+
+// combinedPart renders one part of a combined command for the summary.
+func combinedPart(set bool, value uint64, group string) string {
+	if !set {
+		return "left unchanged"
+	}
+	for _, c := range choicesFor(group) {
+		if c.value == value {
+			return c.label
+		}
+	}
+	return strconv.FormatUint(value, 10)
 }
 
 func onOff(b bool) string {
