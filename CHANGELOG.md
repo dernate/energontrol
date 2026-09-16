@@ -5,10 +5,6 @@
 Breaking release. The module path is now `github.com/dernate/energontrol/v2`, and
 the module requires Go 1.26 and `gopcxmlda` v1.2.2.
 
-It came out of an audit of v1, two audits of the v2 candidate, and the first runs
-against a real Enercon SCADA. The common defect throughout was reporting success
-without the evidence for it. Every fix below has a test that fails without it.
-
 ### Migration
 
 - `New`, `NewWithOptions` and every package-level command take a `Transport`
