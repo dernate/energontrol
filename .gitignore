@@ -29,3 +29,7 @@ go.work.sum
 
 # the compiled diagnostic client, when it is built rather than `go run`
 /scadaprobe
+
+# Scratch space for texts that are written to be pasted somewhere else —
+# merge request bodies, release notes — and have no business being versioned.
+/tmp/
